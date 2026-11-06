@@ -5,7 +5,8 @@
     "NEEV.USA.": "neev",
     "NEEV.CAN.": "neev_ca",
     "NEEV23.USA.": "neev",
-    "DEPEHEV.KOR.": "niro_kr"
+    "DEPEHEV.KOR.": "niro_kr",
+    "DN822HEV.KOR.": "sonata_kr"
   },
   "stock": "patches/{set}/stock",
   "expect": "patches/{set}/expect",

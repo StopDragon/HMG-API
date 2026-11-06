@@ -34,7 +34,8 @@
     },
     {
       "model": [
-        "DEPEHEV"
+        "DEPEHEV",
+        "DN822HEV"
       ],
       "region": "KOR",
       "firmware": "260902"

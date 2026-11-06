@@ -20,6 +20,7 @@ Need one that isn't here? Open a "New hook point" issue.
 | Hyundai Ioniq 5 CAN 260206 | mapped from stock files | 343 of 343 |
 | Hyundai Ioniq 5 USA 260507 | mapped from stock files | 343 of 343 |
 | Hyundai Ioniq 5 USA 260903 | mapped on cars by HMG-API's own mapper | 325 of 343 |
+| Hyundai Sonata Hybrid KOR 260902 | mapped on cars by HMG-API's own mapper | 342 of 343 |
 | Kia EV6 CAN 260206 | mapped from stock files | 343 of 343 |
 | Kia EV6 USA 260507 | checked on a car | 343 of 343 |
 | Kia Niro Hybrid KOR 260902 | checked on a car | 342 of 343 |
@@ -439,7 +440,7 @@ App `com.android.themesettings`.
 |---|---|---|---|---|
 | `themesettings.split_item` | class | `com.android.themesettings.splitscreensettings.SplitScreenItem` | one page in the split-screen page editor | all |
 | `themesettings.split_item.new` | ctor | `new (int, String, boolean)` | (view id, title, on) | all |
-| `themesettings.split_item.type` | method | `?()` → int |  | not on Kia Niro Hybrid KOR 260902 |
+| `themesettings.split_item.type` | method | `?()` → int |  | not on Hyundai Sonata Hybrid KOR 260902, Kia Niro Hybrid KOR 260902 |
 | `themesettings.split_items` | class | a class in `com.android.themesettings.splitscreensettings` (no fixed name) | the editor's page list helpers | all |
 | `themesettings.split_items.make` | method | `static ?(android.content.Context, java.util.LinkedHashMap)` → java.util.ArrayList | the editor's items from {view id: on/off}; unknown ids are skipped | all |
 | `themesettings.split_items.view_name` | method | `static ?(android.content.Context, int)` → String |  | all |
