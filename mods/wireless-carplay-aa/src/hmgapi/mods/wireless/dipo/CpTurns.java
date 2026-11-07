@@ -1,4 +1,14 @@
 package hmgapi.mods.wireless.dipo;
+// Modified by Korea Projection (StopDragon/HMG-API, branch korea-build), 2026-11-07:
+//   - an icon for every maneuver (angle bands, then the type alone, then the blank icon 8);
+//     turn() no longer stops before the distance, HUD and trip when the exact table has none
+//   - a maneuver update without the exit angle keeps the angle for the same maneuver type
+//   - while guidance is on, the last state is resent (refresh) and the HUD list every 2 s
+//   - the crossroad name only when it changes (or every 10 s); maneuver values logged as numbers
+// fallbackIcon, bandedTurn, roundaboutIcon, NO_ICON, the blank HUD list in sendHud, the 47-50
+// arrows in aheadIcon and the refresh/HUD resend are adapted from HMG-Seogaemo
+// (https://github.com/seogaemo/hmg-seogaemo, AGPL-3.0, commit 26eeb97e,
+// modules/wireless-carplay-and-aa/payload/src/hmgapi/mods/wireless/dipo/CpTurns.java.src).
 
 import android.content.Context;
 import android.text.format.DateFormat;
@@ -47,6 +57,44 @@ final class CpTurns {
     /** last HUD list sent (type, next, road), so an unchanged one isn't resent */
     int hudType, hudNext;
     String hudRoad;
+    /**
+     * The last HUD list frame and when it went out. The HUD (a separate unit) can miss a frame
+     * or lose its state while the cluster keeps working, so the unchanged frame is resent every
+     * HUD_RESEND_MS from refresh() (from HMG-Seogaemo).
+     */
+    byte[] lastHud;
+    long hudAt;
+    static final long HUD_RESEND_MS = 2000L;
+    /**
+     * The component whose turn-by-turn is on the cluster (null: none) and when turn() last sent
+     * it; refresh() resends it after REFRESH_MS without one. The phone only sends what changed,
+     * and the car's own navigation calls the cluster every 0.5-0.75 s.
+     */
+    Integer activeId;
+    long lastSendAt;
+    static final long REFRESH_MS = 900L;
+    /** when the phone last sent route guidance; refresh() stops after REFRESH_MAX_MS of silence */
+    long phoneAt;
+    static final long REFRESH_MAX_MS = 300000L;
+    /** run (on this thread) when guidance becomes active, so the caller starts calling refresh() */
+    Runnable onActive;
+    /** the crossroad name last sent and when; resent only when it changes or after CROSSROAD_MS */
+    String crossroad;
+    long crossroadAt;
+    static final long CROSSROAD_MS = 10000L;
+    /** maneuver log: the last values logged and how many lines so far (numbers only, no names) */
+    String maneuverKey;
+    int maneuverLogs;
+    static final int MANEUVER_LOGS_MAX = 300;
+    /** the time (ms since boot: the wall clock jumps when GPS or the network sets it); tests set clock */
+    long clock = -1L;
+    /** the destination name last sent (state 6) and when, as the crossroad name */
+    String destination;
+    long destinationAt;
+
+    long now() {
+        return clock >= 0L ? clock : android.os.SystemClock.elapsedRealtime();
+    }
 
     CpTurns(Context context, Cluster cluster, Runnable restart) {
         this.context = context;
@@ -57,6 +105,7 @@ final class CpTurns {
     /** RouteGuidanceUpdate (DiPO e/u.c) */
     void routeGuidance(Iap2NotiMsg msg) {
         if (msg == null) return;
+        phoneAt = now();
         sourceCheck(msg);
         int[] ids = componentIds(msg);
         if (ids == null) {
@@ -100,6 +149,7 @@ final class CpTurns {
      */
     void maneuver(Iap2NotiMsg msg) {
         if (msg == null) return;
+        phoneAt = now();
         int index = -1;
         int[] ids = null;
         Iap2NotiMsg.Iap2ObjGroup g = msg.getItemGroup();
@@ -239,11 +289,45 @@ final class CpTurns {
 
     /** route guidance stopped (DiPO e/u.nS: the car's navigation took turn-by-turn back, or state 0) */
     void stop() {
+        activeId = null;
         hudBlank();
+    }
+
+    /**
+     * Called about every second on the same thread while active() (the caller stops calling it
+     * once it's false): the last known state goes out again when the phone has said nothing for a
+     * moment, so the cluster and HUD don't age it out. Stops by itself on state 0 or after
+     * REFRESH_MAX_MS without anything from the phone (what's shown is then left to age out).
+     */
+    void refresh() {
+        Integer id = activeId;
+        if (id == null) return;
+        Update u = updates.get(id);
+        if (u == null || u.state == 0) {
+            activeId = null;
+            return;
+        }
+        long t = now();
+        if (t - phoneAt >= REFRESH_MAX_MS) {
+            Dipo.log("CarPlay: no route guidance from the phone for " + (t - phoneAt) / 1000L + " s, turn-by-turn not resent any more");
+            activeId = null;
+            return;
+        }
+        if (lastHud != null && t - hudAt >= HUD_RESEND_MS) {
+            cluster.turnListNew(lastHud);
+            hudAt = t;
+        }
+        if (t - lastSendAt >= REFRESH_MS) turn(id, u);
+    }
+
+    /** whether refresh() still has something to resend */
+    boolean active() {
+        return activeId != null;
     }
 
     /** forget every component's state and maneuvers (DiPO e/u.nT) */
     void reset() {
+        activeId = null;
         for (LinkedHashMap<Integer, Maneuver> m : maneuvers.values()) {
             if (m != null) m.clear();
         }
@@ -290,7 +374,13 @@ final class CpTurns {
                 dist = 0f;
             }
         }
-        if (u.state == 6) cluster.destinationName(0, u.destination);
+        long t = now();
+        String dest = u.destination == null ? "" : u.destination;
+        if (u.state == 6 && (!dest.equals(destination) || t - destinationAt >= CROSSROAD_MS)) {
+            cluster.destinationName(0, u.destination);
+            destination = dest;
+            destinationAt = t;
+        }
         LinkedHashMap<Integer, Maneuver> m = maneuvers.get(id);
         if (m == null || list == null) return;
         Maneuver x = m.get(list[0]);
@@ -304,10 +394,25 @@ final class CpTurns {
             default: unit = Cluster.UNIT_M; break;
         }
         int icon = icon(x.type, x.side, x.junction, x.exit, u.state);
-        // StartRoute has no direction: clear the previous app's HUD arrow.
-        if (x.type == 11 && icon == 1) hudBlank();
-        cluster.crossroadName(x.afterRoad);
-        if (icon == 0) return;
+        // StartRoute has no direction: clear the previous app's HUD arrow (upstream 83eb4ef;
+        // once, so refresh() doesn't clear it again every second)
+        if (x.type == 11 && icon == 1 && hudType != -1) hudBlank();
+        String how = icon == 0 ? null : exactIcon(x.type, x.side, x.junction, x.exit, u.state) != 0 ? "exact" : "band";
+        if (icon == 0) {
+            icon = fallbackIcon(x.type, x.side, x.junction, x.exit);
+            how = icon == NO_ICON ? "blank" : x.exit != 0 ? "angle" : "type";
+        }
+        logManeuver(x, u.state, icon, how);
+        boolean was = activeId != null;
+        activeId = id;
+        lastSendAt = t;
+        if (!was && onActive != null) onActive.run();
+        String road = x.afterRoad == null ? "" : x.afterRoad;
+        if (!road.equals(crossroad) || t - crossroadAt >= CROSSROAD_MS) {
+            cluster.crossroadName(x.afterRoad);
+            crossroad = road;
+            crossroadAt = t;
+        }
         cluster.tbtInfo(icon, 0, 0f, dist, 0, 0, unit, 0, 0);
         sendHud(icon, id, u);
         sendHudDist(dist, unit);
@@ -318,9 +423,114 @@ final class CpTurns {
     /**
      * The cluster icon for a maneuver: iAP2 ManeuverType, driving side (0 right-hand
      * traffic, 1 left), junction type (0 intersection, 1 roundabout) and exit angle, as
-     * the turn-by-turn build maps them (0: nothing to show).
+     * the turn-by-turn build maps them, then a plain turn at an angle the table doesn't list
+     * (bandedTurn). 0: neither; turn() then uses fallbackIcon.
      */
     static int icon(int type, int side, int junction, int exit, int state) {
+        int i = exactIcon(type, side, junction, exit, state);
+        return i != 0 ? i : bandedTurn(type, junction, exit);
+    }
+
+    /**
+     * The cluster's "no turn icon": distances, lanes and trip still go out. Gen5W firmware
+     * (libExSLNavi RGIconIDToClusterDispType) falls back to 8; 64 showed as a spinning
+     * "loading" glyph. Below the HUD list's 64, so sendHud blanks the HUD list instead
+     * (from HMG-Seogaemo).
+     */
+    static final int NO_ICON = 8;
+
+    /**
+     * A plain intersection turn at an angle the exact table doesn't list (75 degrees, 30,
+     * left-hand traffic ...): the nearest of the three basic arrows. Slight up to 67 degrees,
+     * turn up to 112, sharp past that (the lane arrows' bands); a type that says sharp or
+     * slight keeps that. No angle (0) or a roundabout: 0 (from HMG-Seogaemo).
+     */
+    static int bandedTurn(int type, int junction, int exit) {
+        if (junction != 0 || exit == 0) return 0;
+        boolean left;
+        switch (type) {
+            case 1: case 47: case 49: left = true; break;
+            case 2: case 48: case 50: left = false; break;
+            default: return 0;
+        }
+        int a = Math.abs(exit);
+        if (a > 180) a = 360 - a;
+        int sharpness = type == 47 || type == 48 ? 2 : type == 49 || type == 50 ? 0 : a <= 67 ? 0 : a <= 112 ? 1 : 2;
+        // slight 66/71, turn 67/70, sharp 68/69 (right/left)
+        return left ? 71 - sharpness : 66 + sharpness;
+    }
+
+    /**
+     * An icon for a maneuver neither table lists, so the rest still goes out. A misleading
+     * arrow is worse than none: with an exit angle, the nearest direction arrow; a type with a
+     * clear meaning but no angle (Apple Maps and Naver Map in Korea send none), its own icon;
+     * else NO_ICON, never "straight" for a turn (from HMG-Seogaemo).
+     */
+    static int fallbackIcon(int type, int side, int junction, int exit) {
+        // departure (StartRoute) is no turn, whatever angle comes with it (upstream 83eb4ef)
+        if (type == 11) return NO_ICON;
+        int a = bandedTurn(type, junction, exit);
+        if (a != 0) return a;
+        if (exit != 0) {
+            if (junction != 0) return roundaboutIcon(side, exit);
+            boolean left;
+            switch (type) {
+                case 1: case 47: case 49: case 13: left = true; break;
+                case 2: case 48: case 50: case 14: left = false; break;
+                default: left = exit < 0; break;
+            }
+            int deg = Math.abs(exit);
+            if (deg > 180) deg = 360 - deg;
+            if (deg >= 157) return side == 0 ? 72 : 73;
+            if (deg <= 22 && type != 1 && type != 2) return 65;
+            int sharpness = deg <= 67 ? 0 : deg <= 112 ? 1 : 2;
+            return left ? 71 - sharpness : 66 + sharpness;
+        }
+        switch (type) {
+            case 1: return 70;    // left turn
+            case 2: return 67;    // right turn
+            case 47: return 69;   // sharp left
+            case 48: return 68;   // sharp right
+            case 49: return 71;   // slight left
+            case 50: return 66;   // slight right
+            case 13: return 71;   // keep left
+            case 14: return 66;   // keep right
+            case 3: return 65;
+            case 4: case 18: return side == 0 ? 72 : 73;
+            case 5: case 9: return 172;
+            case 6: return side == 0 ? 96 : 97;   // enter a roundabout
+            case 10: case 12: return 112;
+            case 15: return 176;
+            default: return NO_ICON;
+        }
+    }
+
+    /** the roundabout icon with the nearest exit angle among those the exact table uses (from HMG-Seogaemo) */
+    static int roundaboutIcon(int side, int exit) {
+        int[] angle = { -180, -135, -120, -90, -45, -30, 0, 90, 120, 135, 180 };
+        int[] icon = { 102, 104, 104, 105, 104, 107, side == 0 ? 96 : 97, 99, 100, 100, 102 };
+        int e = exit;
+        if (e > 180) e -= 360;
+        else if (e < -180) e += 360;
+        int best = 0;
+        for (int k = 1; k < angle.length; k++) {
+            if (Math.abs(angle[k] - e) < Math.abs(angle[best] - e)) best = k;
+        }
+        return icon[best];
+    }
+
+    /** the maneuver's values (numbers only: no road or instruction text) when they change, up to MANEUVER_LOGS_MAX lines */
+    void logManeuver(Maneuver x, int state, int icon, String how) {
+        String k = x.type + " " + x.side + " " + x.junction + " " + x.exit + " " + state + " " + icon;
+        if (k.equals(maneuverKey) || maneuverLogs >= MANEUVER_LOGS_MAX) return;
+        maneuverKey = k;
+        maneuverLogs++;
+        Dipo.log("CarPlay: maneuver type " + x.type + " side " + x.side + " junction " + x.junction + " exit " + x.exit
+                + " state " + state + " -> icon " + icon + " (" + how + ")");
+    }
+
+    /** the turn-by-turn build's exact table (0: not in it) */
+    static int exactIcon(int type, int side, int junction, int exit, int state) {
         switch (type) {
             // Ordinary left/right types carry the direction even when the optional
             // exit angle is absent (the parser resets it to zero on every update).
@@ -407,11 +617,28 @@ final class CpTurns {
         }
         if (type == 3) return 65;
         if (type == 4) return side == 0 ? 72 : 73;
+        if (type == 47) return 69;   // sharp left (47-50 from HMG-Seogaemo)
+        if (type == 48) return 68;   // sharp right
+        if (type == 49) return 71;   // slight left
+        if (type == 50) return 66;   // slight right
         return 64;
     }
 
     /** the HUD's list frame (0xF2): count, this icon, the next turn's icon, 0, road after this turn (UTF-16LE) */
     void sendHud(int type, Integer id, Update u) {
+        if (type == NO_ICON) {
+            // no arrow for this maneuver: the empty list blanks the HUD's turn, so the previous
+            // turn's arrow doesn't stay up (from HMG-Seogaemo, seen on their car 2026-11-05)
+            if (lastHud != null && lastHud.length == 1) return;
+            byte[] empty = { (byte) 0xF2 };
+            cluster.turnListNew(empty);
+            lastHud = empty;
+            hudAt = now();
+            hudType = -1;
+            hudNext = 0;
+            hudRoad = null;
+            return;
+        }
         if (type < 64) return;
         int next = 0;
         String road = "";
@@ -441,6 +668,8 @@ final class CpTurns {
         System.arraycopy(r, 0, f, 5, n);
         Dipo.log("CarPlay: hud list type " + type + " next " + next);
         cluster.turnListNew(f);
+        lastHud = f;
+        hudAt = now();
         hudType = type;
         hudNext = next;
         hudRoad = road;
@@ -469,6 +698,9 @@ final class CpTurns {
         hudType = -1;
         hudNext = 0;
         hudRoad = null;
+        lastHud = null;
+        crossroad = null;
+        destination = null;
         byte[] empty = { (byte) 0xF2 };
         cluster.turnListNew(empty);
         cluster.turnListNew(empty);
@@ -739,10 +971,17 @@ final class CpTurns {
             linkedLane = 0;
         }
 
-        /** as DiPO, the exit angle resets with every update (it's only kept if this one carries it) */
+        /**
+         * DiPO reset the exit angle with every update, so an update carrying only the distance
+         * left the turn with no angle and no icon. Now a partial update (neither the type nor the
+         * angle in it) keeps the angle. One that names the type again is taken as the whole
+         * maneuver (the phone may reuse an index for a new one), so without an angle it has none.
+         */
         void read(int index, int id, Iap2NotiMsg msg) {
             Iap2NotiMsg.Iap2ObjGroup g = msg.getItemGroup();
             this.index = index;
+            int wasExit = exit;
+            boolean hasExit = false, hasType = false;
             exit = 0;
             for (int k = 0; k < g.getItemCnt(); k++) {
                 Iap2NotiMsg.Iap2ObjItem it = g.getObjItem(k);
@@ -759,6 +998,7 @@ final class CpTurns {
                             }
                         } else if (item == 11 && v != null) {
                             exit = v[0];
+                            hasExit = true;
                         }
                         break;
                     }
@@ -776,7 +1016,7 @@ final class CpTurns {
                         int[] v = n > 0 ? it.getItemIntArray() : null;
                         if (v == null) break;
                         switch (item) {
-                            case 3: type = v[0]; break;
+                            case 3: type = v[0]; hasType = true; break;
                             case 7: distUnits = v[0]; break;
                             case 8: side = v[0]; break;
                             case 9: junction = v[0]; break;
@@ -795,6 +1035,7 @@ final class CpTurns {
                     }
                 }
             }
+            if (!hasExit && !hasType) exit = wasExit;
         }
     }
 }

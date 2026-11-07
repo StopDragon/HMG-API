@@ -129,6 +129,17 @@ public final class Dipo {
                 restartRouteGuidance();
             }
         });
+        // Korea Projection (korea-build): resend the last turn-by-turn about every second while it's
+        // on (CpTurns.refresh); the tick ends itself once CpTurns isn't active (state 0, stop, a
+        // disconnect, a new source app, or 5 minutes without the phone)
+        turns.onActive = new Runnable() {
+            @Override
+            public void run() {
+                if (refreshing) return;
+                refreshing = true;
+                turnsHandler.postDelayed(REFRESH, 1000L);
+            }
+        };
         rg = new RgListener();
         mod.hook(app.classLoader, "dipo.iap2_proxy.stop_route_guidance", new MethodHook() {
             @Override
@@ -144,6 +155,23 @@ public final class Dipo {
         });
         log("CarPlay: turn-by-turn to the cluster (HMG-API's route guidance listener)");
     }
+
+    /** whether REFRESH is scheduled (only touched on turnsHandler's thread) */
+    static boolean refreshing;
+    /** refresh errors logged so far: only the first few, so a failure that repeats every second doesn't fill the log */
+    static int refreshErrors;
+    static final Runnable REFRESH = new Runnable() {
+        @Override
+        public void run() {
+            try {
+                turns.refresh();
+            } catch (Throwable x) {
+                if (refreshErrors++ < 3) error("CarPlay turn-by-turn refresh", x);
+            }
+            if (turns.active()) turnsHandler.postDelayed(this, 1000L);
+            else refreshing = false;
+        }
+    };
 
     static void post(Runnable r) {
         final Runnable run = r;

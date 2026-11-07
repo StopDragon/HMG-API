@@ -4,7 +4,13 @@
     "CVEV.CAN.": "ev6_ca",
     "NEEV.USA.": "neev",
     "NEEV.CAN.": "neev_ca",
-    "NEEV23.USA.": "neev"
+    "NEEV23.USA.": "neev",
+    "DEPEHEV.KOR.": "depehev",
+    "DN822HEV.KOR.": "dn822hev",
+    "": "kor",
+    "IGPEHEV.KOR.": "dn822hev",
+    "JSN.KOR.": "dn822hev",
+    "IGPE.KOR.": "dn822hev"
   },
   "stock": "patches/{set}/stock",
   "expect": "patches/{set}/expect",
