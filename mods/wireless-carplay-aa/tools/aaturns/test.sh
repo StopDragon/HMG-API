@@ -1,8 +1,9 @@
 #!/bin/sh
-# Host test of the Wireless mod's Android Auto turn-by-turn (AaTurns), with stand-ins
+# Host test of the Wireless mod's Android Auto turn-by-turn (AaTurns) and the stock
+# navigation's observation lines (StockLog), with stand-ins
 # for Android and HMG-API's Cluster/Car that record every cluster call.
 set -e
 cd "$(dirname "$0")"
 CP=$(mktemp -d); trap 'rm -rf "$CP"' EXIT
-javac --release 8 -Xlint:-options -nowarn -d "$CP" $(find stubs test -name '*.java') ../../src/hmgapi/mods/wireless/AaTurns.java
+javac --release 8 -Xlint:-options -nowarn -d "$CP" $(find stubs test -name '*.java') ../../src/hmgapi/mods/wireless/AaTurns.java ../../src/hmgapi/mods/wireless/StockLog.java
 java -cp "$CP" hmgapi.mods.wireless.AaTurnsTest

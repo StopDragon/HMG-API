@@ -1,6 +1,6 @@
 package android.os;
 
-/** host stand-in (Korea Projection): CpTurns reads the time since boot; the tests set CpTurns.clock instead */
+/** host stand-in (Korea Projection): CpTurns and AaTurns read the time since boot; the tests set their clock instead */
 public final class SystemClock {
     private SystemClock() {}
 

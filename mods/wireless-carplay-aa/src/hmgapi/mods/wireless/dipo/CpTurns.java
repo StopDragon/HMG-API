@@ -9,6 +9,16 @@ package hmgapi.mods.wireless.dipo;
 // arrows in aheadIcon and the refresh/HUD resend are adapted from HMG-Seogaemo
 // (https://github.com/seogaemo/hmg-seogaemo, AGPL-3.0, commit 26eeb97e,
 // modules/wireless-carplay-and-aa/payload/src/hmgapi/mods/wireless/dipo/CpTurns.java.src).
+// Modified by Korea Projection, 2026-11-08 (mod 2.3.0, "match the stock Korean navigation"):
+//   - Korean stock DiPO numbers: on-ramp (9) 160, highway off-ramp left/right (22/23) 165/164
+//   - fallbackIcon: off-ramp 163, ferry exit/change 176, turn at the end 70/67, U-turn when
+//     possible 72, end of directions 112, change highway 163 (numbers the stock engine uses)
+//   - roundaboutIcon: the stock DiPO angles exactly, else 8 directions in 45-degree bands
+//   - aheadIcon: "none" is 8 (the engine's no-guidance icon), not 64 (a loading glyph on Gen5W)
+//   - lanes: laneValues and LaneGlyphs (the car-verified multi-arrow glyphs and 2-bit per-arrow
+//     colours) are ported from HMG-Seogaemo (same repository, licence and commit 26eeb97 as above)
+//   - HUD distance (2C): the 2nd and 3rd points from the maneuver list, metres under 1 km as the
+//     stock navigation sends them, 65535 (invalid) for a point there isn't and when guidance ends
 
 import android.content.Context;
 import android.text.format.DateFormat;
@@ -230,12 +240,20 @@ final class CpTurns {
         cluster.laneInfo(f);
     }
 
-    /** one lane: {status (1, or 2 highlighted), up to 3 arrow icons} */
+    /**
+     * One lane: {status byte, up to 3 arrow image ids}. The phone gives a lane a status (0 not
+     * good, 1 good, 2 preferred), its arrow angles and the angle along the route (highlight);
+     * laneValues turns them into the cluster's per-arrow colours and glyphs (from HMG-Seogaemo,
+     * commit 26eeb97, AGPL-3.0).
+     */
     static int[] laneOne(Iap2NotiMsg.Iap2ObjGroup g) {
-        int[] r = new int[4];
-        r[0] = 1;
-        if (g == null) return r;
+        if (g == null) {
+            int[] r = new int[4];
+            r[0] = 1;
+            return r;
+        }
         int[] angles = null, highlight = null;
+        int status = -1;
         for (int k = 0; k < g.getItemCnt(); k++) {
             Iap2NotiMsg.Iap2ObjItem it = g.getObjItem(k);
             if (it == null) continue;
@@ -245,22 +263,143 @@ final class CpTurns {
             if (v == null || v.length == 0) continue;
             int id = it.getItemId();
             if (id == 1) {
-                if (v[0] == 2) r[0] = 2;
+                status = v[0];
             } else if (id == 2) {
                 angles = v;
             } else if (id == 3) {
                 highlight = v;
             }
         }
-        if (highlight != null && highlight.length > 0) r[0] = 2;
+        return laneValues(status, angles, highlight);
+    }
+
+    /**
+     * Ported from HMG-Seogaemo (https://github.com/seogaemo/hmg-seogaemo, AGPL-3.0, commit 26eeb97,
+     * CpTurns.java.src laneValues), unchanged.
+     * One lane as {status byte, up to 3 arrow image ids}. The status byte holds 2 bits per arrow
+     * slot, slot 0 lowest: 00 not drawn, 01 normal (white), 10 recommended (blue), 11 inactive
+     * (grey), car-verified by HMG-Seogaemo; the arrows are drawn overlaid, so a lane with several
+     * directions needs the matching component glyphs (LaneGlyphs), not the single ones.
+     *
+     * The colours mirror CarPlay per lane, from the lane status and the highlight angle (an arrow
+     * "matches" when its angle equals a highlight angle; none valid, or none matching, means all
+     * arrows match): status 0 grey on every arrow; status 1 white on the matching arrows and grey
+     * on the others; status 2 blue on the matching arrows and grey on the others. Blue only ever
+     * comes from the phone's status 2. A status that is not 0..2 counts as 1. A lane with no valid
+     * angle sends the lane's value on slot 0 only. A set of directions with no verified glyph row
+     * sends only the highlighted arrow (else the first) as a single glyph.
+     */
+    static int[] laneValues(int status, int[] angles, int[] highlights) {
+        int[] r = new int[4];
+        // the colour of an arrow on the route (matching) and off it
+        int on = status == 2 ? 2 : status == 0 ? 3 : 1, off = 3;
+        // the lane's distinct direction classes (laneIcon values), in the phone's order, and which one the route takes
+        int[] cls = new int[8];
+        boolean[] hit = new boolean[8];
+        int n = 0;
+        boolean anyHit = false;
         if (angles != null) {
-            int n = 0;
-            for (int k = 0; k < angles.length && n < 3; k++) {
-                int icon = laneIcon(angles[k]);
-                if (icon != 0) r[1 + n++] = icon;
+            for (int k = 0; k < angles.length; k++) {
+                int a = angles[k];
+                if (a < -180 || a > 180) continue;
+                int c = laneIcon(a), i = 0;
+                while (i < n && cls[i] != c) i++;
+                if (i == n) cls[n++] = c;
+                if (highlights != null) for (int h : highlights) if (h == a) hit[i] = anyHit = true;
             }
         }
+        if (n == 0) {
+            r[0] = on;
+            return r;
+        }
+        // the arrows that take the lane's colour: the highlighted ones, or all when none matches
+        boolean[] rec = new boolean[8];
+        for (int i = 0; i < n; i++) rec[i] = !anyHit || hit[i];
+        boolean snap = false;
+        int[][] row = LaneGlyphs.find(cls, n, false);
+        if (row == null) {
+            row = LaneGlyphs.find(cls, n, true);
+            snap = row != null;
+        }
+        if (row == null) {
+            // not a verified set (more than 3 directions, or none of the table's): only the
+            // highlighted arrow, else the first, as a single glyph
+            int pick = 0;
+            for (int i = n - 1; i >= 0; i--) if (rec[i]) pick = i;
+            row = new int[][] { { cls[pick] }, { cls[pick] } };
+        }
+        for (int j = 0; j < row[0].length; j++) {
+            boolean slotRec = false;
+            for (int i = 0; i < n; i++) if (rec[i] && LaneGlyphs.fold(cls[i], snap) == row[0][j]) slotRec = true;
+            r[0] |= (slotRec ? on : off) << (2 * j);
+            r[1 + j] = row[1][j];
+        }
         return r;
+    }
+
+    /**
+     * Ported from HMG-Seogaemo (https://github.com/seogaemo/hmg-seogaemo, AGPL-3.0, commit 26eeb97,
+     * CpTurns.java.src LaneGlyphs), unchanged: image ids for the arrows of a multi-direction lane,
+     * the 26 sets car-verified by HMG-Seogaemo (2026-11-05). Single directions use the plain ids
+     * 1..8 (laneIcon values, which double as the direction classes here). Each row is {direction
+     * classes in slot order, image ids in slot order}; the lane's set of directions matches a row
+     * whatever order the phone lists its angles in, and slot k of the status byte belongs to the
+     * k-th class of the row.
+     */
+    static final class LaneGlyphs {
+        static final int ST = 1, SLR = 2, R = 3, SHR = 4, UT = 5, SHL = 6, L = 7, SLL = 8;
+        static final int[][][] SETS = {
+            { { UT, L }, { 10, 14 } },
+            { { UT, SLL }, { 10, 15 } },
+            { { ST, L }, { 9, 12 } },
+            { { ST, SLL }, { 9, 13 } },
+            { { ST, SHL }, { 9, 11 } },
+            { { ST, UT }, { 9, 10 } },
+            { { L, SLL }, { 12, 13 } },
+            { { ST, R }, { 16, 18 } },
+            { { ST, SLR }, { 16, 19 } },
+            { { ST, SHR }, { 16, 17 } },
+            { { R, SLR }, { 18, 21 } },
+            { { L, R }, { 31, 32 } },
+            { { SLL, SLR }, { 30, 33 } },
+            { { UT, R }, { 26, 32 } },
+            { { UT, SLR }, { 26, 33 } },
+            { { L, ST, R }, { 28, 22, 24 } },
+            { { SLL, ST, R }, { 30, 22, 24 } },
+            { { L, ST, SLR }, { 28, 22, 33 } },
+            { { SHL, ST, R }, { 27, 22, 24 } },
+            { { L, ST, SHR }, { 28, 22, 25 } },
+            { { SLL, ST, SLR }, { 30, 22, 33 } },
+            { { L, SLL, ST }, { 12, 13, 9 } },
+            { { ST, SLR, R }, { 16, 19, 18 } },
+            { { UT, L, ST }, { 26, 31, 22 } },
+            { { UT, ST, R }, { 26, 22, 24 } },
+            { { UT, L, R }, { 26, 31, 32 } },
+        };
+
+        /** snap: slight and sharp turns count as the plain left / right */
+        static int fold(int c, boolean snap) {
+            if (!snap) return c;
+            return c == SLR || c == SHR ? R : c == SLL || c == SHL ? L : c;
+        }
+
+        /** the row for the classes cls[0..n) (one class: the plain glyph), or null when none matches */
+        static int[][] find(int[] cls, int n, boolean snap) {
+            int mask = 0, count = 0, first = 0;
+            for (int i = 0; i < n; i++) {
+                int c = fold(cls[i], snap);
+                if ((mask & (1 << c)) != 0) continue;
+                mask |= 1 << c;
+                if (count++ == 0) first = c;
+            }
+            if (count == 1) return new int[][] { { first }, { first } };
+            for (int[][] row : SETS) {
+                int m = 0;
+                for (int c : row[0]) m |= 1 << c;
+                if (m == mask) return row;
+            }
+            return null;
+        }
     }
 
     /** a lane angle (degrees, right positive) as the cluster's arrow: 1 straight, 2-4 right, 5 back, 6-8 left */
@@ -415,7 +554,7 @@ final class CpTurns {
         }
         cluster.tbtInfo(icon, 0, 0f, dist, 0, 0, unit, 0, 0);
         sendHud(icon, id, u);
-        sendHudDist(dist, unit);
+        sendHudDist(dist, unit, id, u);
         sendTrip(u);
         sendAhead(id, u);
     }
@@ -469,6 +608,21 @@ final class CpTurns {
     static int fallbackIcon(int type, int side, int junction, int exit) {
         // departure (StartRoute) is no turn, whatever angle comes with it (upstream 83eb4ef)
         if (type == 11) return NO_ICON;
+        // Korea Projection 2.3.0: the Korean stock numbers by type, whatever the angle (1.7.1 map 2-A):
+        // types the stock DiPO table leaves out (it then sends nothing and the previous arrow stays),
+        // with numbers the stock engine itself uses, and the stock ramps without their exact geometry
+        switch (type) {
+            case 8: case 51: return 163;        // off-ramp, change highway: highway exit, straight
+            case 9: return 160;                 // on-ramp
+            case 22: return 165;                // highway off-ramp left
+            case 23: return 164;                // highway off-ramp right
+            case 16: case 17: return 176;       // exit / change ferry
+            case 20: return 70;                 // left turn at the end of the road
+            case 21: return 67;                 // right turn at the end of the road
+            case 26: return side == 1 ? 73 : 72; // U-turn when possible
+            case 27: return 112;                // end of directions: destination ahead
+            default: break;
+        }
         int a = bandedTurn(type, junction, exit);
         if (a != 0) return a;
         if (exit != 0) {
@@ -497,26 +651,53 @@ final class CpTurns {
             case 14: return 66;   // keep right
             case 3: return 65;
             case 4: case 18: return side == 0 ? 72 : 73;
-            case 5: case 9: return 172;
+            case 5: return 172;
             case 6: return side == 0 ? 96 : 97;   // enter a roundabout
             case 10: case 12: return 112;
             case 15: return 176;
-            default: return NO_ICON;
+            default: return NO_ICON;       // 0 no turn, 7 exit roundabout, 11 start ...
         }
     }
 
-    /** the roundabout icon with the nearest exit angle among those the exact table uses (from HMG-Seogaemo) */
+    /**
+     * A roundabout exit the exact table doesn't list for this type: first the exit angles the
+     * stock DiPO table uses, with its icons (right-hand traffic: 0 96, 90 99, 135 100, 180 102,
+     * -45 104, -90 105, -135 104; left-hand traffic: its side-1 values), then the nearest of the
+     * stock engine's 8 roundabout directions (A family; 1.7.1 map 2-C): 45-degree bands centred on
+     * 0, 45, 90 ... Left-hand traffic keeps the A family (B 192-203 can't be checked in Korea).
+     */
     static int roundaboutIcon(int side, int exit) {
-        int[] angle = { -180, -135, -120, -90, -45, -30, 0, 90, 120, 135, 180 };
-        int[] icon = { 102, 104, 104, 105, 104, 107, side == 0 ? 96 : 97, 99, 100, 100, 102 };
         int e = exit;
         if (e > 180) e -= 360;
         else if (e < -180) e += 360;
-        int best = 0;
-        for (int k = 1; k < angle.length; k++) {
-            if (Math.abs(angle[k] - e) < Math.abs(angle[best] - e)) best = k;
+        if (side == 1) {
+            switch (e) {
+                case 0: return 97;
+                case 90: return 99;
+                case 120: return 100;
+                case 180: case -180: return 102;
+                case -120: return 104;
+                case -90: return 105;
+                case -30: return 107;
+                default: break;
+            }
+        } else {
+            switch (e) {
+                case 0: return 96;
+                case 90: return 99;
+                case 135: return 100;
+                case 180: case -180: return 102;
+                case -45: return 104;
+                case -90: return 105;
+                case -135: return 104;
+                default: break;
+            }
         }
-        return icon[best];
+        int a = Math.abs(e);
+        if (a <= 22) return 96;
+        if (a >= 158) return 102;
+        if (e > 0) return a <= 67 ? 97 : a <= 112 ? 99 : 100;
+        return a <= 67 ? 107 : a <= 112 ? 105 : 104;
     }
 
     /** the maneuver's values (numbers only: no road or instruction text) when they change, up to MANEUVER_LOGS_MAX lines */
@@ -560,9 +741,10 @@ final class CpTurns {
                 if (side == 0 && junction == 0) return 72;
                 if (side == 1 && junction == 0) return 73;
                 return 0;
-            case 5:
-            case 9:
+            case 5:   // follow road
                 return side == 0 && junction == 0 && exit == 0 ? 172 : 0;
+            case 9:   // on-ramp: 160 in the Korean stock DiPO (the US build had 172)
+                return side == 0 && junction == 0 && exit == 0 ? 160 : 0;
             case 12: {   // arrive; state 2 (arrived): 3
                 int i = side == 0 && junction == 0 ? 112 : 0;
                 return state == 2 ? 3 : i;
@@ -571,8 +753,9 @@ final class CpTurns {
                 return (side == 0 || side == 1) && junction == 0 && exit == 0 ? 1 : 0;
             case 15: return side == 0 && junction == 0 && exit == 0 ? 176 : 0;
             case 19: return side == 0 && junction == 1 && exit == -180 ? 102 : 0;
-            case 22: return side == 0 && junction == 0 && exit == 0 ? 82 : 0;
-            case 23: return side == 0 && junction == 0 && exit == 0 ? 81 : 0;
+            // highway off-ramp left / right: 165 / 164 in the Korean stock DiPO (the US build had 82 / 81)
+            case 22: return side == 0 && junction == 0 && exit == 0 ? 165 : 0;
+            case 23: return side == 0 && junction == 0 && exit == 0 ? 164 : 0;
             case 24: return side == 0 && junction == 0 && exit == 0 ? 114 : 0;
             case 25: return side == 0 && junction == 0 && exit == 0 ? 113 : 0;
             case 28: return side == 0 && junction == 1 && exit == 135 ? 100 : 0;
@@ -601,7 +784,11 @@ final class CpTurns {
         }
     }
 
-    /** an upcoming turn's small icon (HUD list and turn list): 64 none, 65 straight, 66-68 right, 69-71 left, 72/73 U-turn */
+    /**
+     * an upcoming turn's small icon (HUD list and turn list): 65 straight, 66-68 right, 69-71 left,
+     * 72/73 U-turn, else NO_ICON 8 (Korea Projection 2.3.0: was 64, a loading glyph on Gen5W; only
+     * HMG-API sends this slot, the stock DiPO sends no turn list)
+     */
     static int aheadIcon(int type, int side, int junction, int exit) {
         if (type == 1) {
             if (exit == -120 && junction == 0) return 69;
@@ -621,7 +808,7 @@ final class CpTurns {
         if (type == 48) return 68;   // sharp right
         if (type == 49) return 71;   // slight left
         if (type == 50) return 66;   // slight right
-        return 64;
+        return NO_ICON;
     }
 
     /** the HUD's list frame (0xF2): count, this icon, the next turn's icon, 0, road after this turn (UTF-16LE) */
@@ -650,6 +837,8 @@ final class CpTurns {
             if (list.length > 1) {
                 Maneuver y = m.get(list[1]);
                 if (y != null && y.distance > 0) next = aheadIcon(y.type, y.side, y.junction, y.exit);
+                // no arrow for the next turn: the list has this turn only (count 1)
+                if (next == NO_ICON) next = 0;
             }
         }
         if (hudType == type && hudNext == next && hudRoad != null && hudRoad.equals(road)) return;
@@ -675,23 +864,87 @@ final class CpTurns {
         hudRoad = road;
     }
 
-    /** the HUD's distance (updateTBTSubInfo2C: unit, tenths for km/mi, whole up to 4095) */
-    void sendHudDist(float f, int unit) {
+    /** the 2C value for "no point" and for guidance over, as the stock navigation sends it */
+    static final int HUD_NO_POINT = 65535;
+
+    /**
+     * The HUD's distances (updateTBTSubInfo2C: unit, tenths for km/mi, whole; for the next three
+     * points). The 1st is the distance to this maneuver as the phone shows it, but under 1 km in
+     * metres, as the stock navigation sends it. The 2nd and 3rd (Korea Projection 2.3.0, 1.7.1 map
+     * 2-H) add the next maneuvers' distances in the current list (iAP2 DistanceBetweenManeuver,
+     * metres, taken as the distance from the maneuver before) to the distance to this maneuver in
+     * metres (item 10), only when the phone's last update carried it, in the owner's units; a point
+     * the phone hasn't given is HUD_NO_POINT, as in the stock navigation.
+     */
+    void sendHudDist(float f, int unit, Integer id, Update u) {
         if (f < 0f || unit < 0 || unit > 4) return;
-        int whole = (int) f;
-        if (whole > 4095) whole = 4095;
-        int tenths = 0;
-        if (unit == Cluster.UNIT_KM || unit == Cluster.UNIT_MI) {
-            tenths = (int) ((f - whole) * 10f + 0.5f);
-            if (tenths < 0) tenths = 0;
-            if (tenths > 9) tenths = 9;
+        int[] p1;
+        if (unit == Cluster.UNIT_KM && f < 1f) {
+            p1 = new int[] { Cluster.UNIT_M, 0, (int) (f * 1000f + 0.5f) };
+        } else {
+            int whole = (int) f;
+            if (whole > 4095) whole = 4095;
+            int tenths = 0;
+            if (unit == Cluster.UNIT_KM || unit == Cluster.UNIT_MI) {
+                tenths = (int) ((f - whole) * 10f + 0.5f);
+                if (tenths < 0) tenths = 0;
+                if (tenths > 9) tenths = 9;
+            }
+            p1 = new int[] { unit, tenths, whole };
         }
-        cluster.tbtSubInfo2C(unit, tenths, whole, 0, 0, 0, 0, 0, 0);
+        int[] p2 = { 0, 0, HUD_NO_POINT }, p3 = { 0, 0, HUD_NO_POINT };
+        LinkedHashMap<Integer, Maneuver> m = id == null ? null : maneuvers.get(id);
+        int[] list = u == null ? null : u.list;
+        if (m != null && list != null && list.length > 1) {
+            int owner = Car.distanceUnit(context);
+            boolean miles = owner == Car.DISTANCE_MILES
+                    || (owner != Car.DISTANCE_KM && (unit == Cluster.UNIT_MI || unit == Cluster.UNIT_FT || unit == Cluster.UNIT_YD));
+            long at = u.distNext;
+            Maneuver y = m.get(list[1]);
+            // only with the distance to this maneuver from the phone's last update (item 10), not an older one
+            if (u.distNextFresh && at >= 0 && y != null && y.distance > 0) {
+                at += y.distance;
+                p2 = hudPoint(at, miles);
+                Maneuver z = list.length > 2 ? m.get(list[2]) : null;
+                if (z != null && z.distance > 0) p3 = hudPoint(at + z.distance, miles);
+            }
+        }
+        cluster.tbtSubInfo2C(p1[0], p1[1], p1[2], p2[0], p2[1], p2[2], p3[0], p3[1], p3[2]);
+    }
+
+    /** one 2C point {unit, tenths, whole}: m under 1 km, else km (miles: ft under 161 m, else mi), whole up to 65534 */
+    static int[] hudPoint(long m, boolean miles) {
+        int unit, tenths = 0;
+        long whole;
+        if (miles) {
+            if (m < 161) {
+                unit = Cluster.UNIT_FT;
+                whole = m * 3281 / 1000;
+            } else {
+                long t = m * 10 / 1609;
+                unit = Cluster.UNIT_MI;
+                whole = t / 10;
+                tenths = (int) (t % 10);
+            }
+        } else if (m < 1000) {
+            unit = Cluster.UNIT_M;
+            whole = m;
+        } else {
+            unit = Cluster.UNIT_KM;
+            whole = m / 1000;
+            tenths = (int) (m % 1000 / 100);
+        }
+        if (whole > 65534) {
+            whole = 65534;
+            tenths = 0;
+        }
+        return new int[] { unit, tenths, (int) whole };
     }
 
     /** HUD list and extras cleared (the build's sendHudBlank) */
     void hudBlank() {
-        cluster.tbtSubInfo2C(0, 0, 0, 0, 0, 0, 0, 0, 0);
+        // no points: 65535 as the stock navigation sends when guidance ends (Korea Projection 2.3.0; was 0)
+        cluster.tbtSubInfo2C(0, 0, HUD_NO_POINT, 0, 0, HUD_NO_POINT, 0, 0, HUD_NO_POINT);
         byte[] lanes = new byte[81];
         lanes[0] = (byte) 0xF1;
         cluster.laneInfo(lanes);
@@ -831,6 +1084,8 @@ final class CpTurns {
     /** one display component's route guidance state (DiPO e/c) */
     static final class Update {
         int state, maneuverState, distLeft, distLeftUnits, distNext, nextUnits, count, laneIndex, laneCount;
+        /** the last update carried distNext (item 10); else the HUD's 2nd and 3rd points stay empty */
+        boolean distNextFresh;
         String road, destination, distLeftStr, nextStr, sourceName;
         long eta, timeLeft;
         int[] list;
@@ -854,6 +1109,7 @@ final class CpTurns {
             distLeftStr = "";
             distLeftUnits = 0;
             distNext = 0;
+            distNextFresh = false;
             nextStr = "";
             nextUnits = 0;
             list = null;
@@ -870,6 +1126,7 @@ final class CpTurns {
         void read(int id, Iap2NotiMsg msg) {
             Iap2NotiMsg.Iap2ObjGroup g = msg == null ? null : msg.getItemGroup();
             if (g == null) return;
+            distNextFresh = false;
             for (int k = 0; k < g.getItemCnt(); k++) {
                 Iap2NotiMsg.Iap2ObjItem it = g.getObjItem(k);
                 int item = it.getItemId(), n = it.getItemObjCount();
@@ -897,7 +1154,10 @@ final class CpTurns {
                         int[] v = n > 0 ? it.getItemIntArray() : null;
                         if (v == null) break;
                         if (item == 7) distLeft = v[0];
-                        else if (item == 10) distNext = v[0];
+                        else if (item == 10) {
+                            distNext = v[0];
+                            distNextFresh = true;
+                        }
                         break;
                     }
                     case 3:

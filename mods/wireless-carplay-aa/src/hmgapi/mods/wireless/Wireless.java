@@ -1,4 +1,9 @@
 package hmgapi.mods.wireless;
+// Modified by Korea Projection (StopDragon/HMG-API, branch korea-build), 2026-11-08 (mod 2.3.0):
+//   - the car navigation's lane frames (updateLaneInfo) are skipped too while a phone guides, so
+//     the cluster and HUD show the phone's lanes only (1.7.1 map 2-H); back as soon as it stops
+//   - with Korea Projection's debug log on, what the car navigation sends (icon, lane frame, 2C)
+//     is logged as numbers (StockLog); Android Auto's turn log lines (AaTurns) go to the mod's log
 
 import android.content.ComponentName;
 import android.content.Context;
@@ -52,7 +57,21 @@ public final class Wireless extends ModEntry {
     /** NavigationCluster's turn-by-turn calls: the car navigation's own guidance, off while a phone guides */
     static final String[] NAVI_TBT = { "update_tbt_info", "update_tbt_sub_info", "update_tbt_sub_info_b", "update_tbt_sub_info2",
         "update_tbt_sub_info2_b", "update_tbt_sub_info_2c", "update_remain_dis", "update_tp_crossroad_name",
-        "update_tp_destination_name", "update_tp_turn_list", "update_tp_turn_list_new", "update_tp_lane_info" };
+        "update_tp_destination_name", "update_tp_turn_list", "update_tp_turn_list_new", "update_tp_lane_info",
+        "update_lane_info" };
+    /** Korea Projection's debug log is on (StockLog.DEBUG_FILE, read as root in the zygote; false in a late load) */
+    static volatile boolean debug;
+    /** Android Auto turn log lines so far in this process (AaTurns.TURN_LOGS_MAX in all) */
+    static final java.util.concurrent.atomic.AtomicInteger aaTurnLogs = new java.util.concurrent.atomic.AtomicInteger();
+
+    @Override
+    public void zygoteInit(ModContext mod) {
+        try {
+            debug = new java.io.File(StockLog.DEBUG_FILE).exists();
+        } catch (Throwable t) {
+            debug = false;
+        }
+    }
 
     @Override
     public void appLoaded(final ModContext mod, LoadedApp app) {
@@ -82,19 +101,29 @@ public final class Wireless extends ModEntry {
     /**
      * In the car navigation app, while a phone guides (Android Auto or CarPlay): its own
      * turn-by-turn calls to the cluster and HUD are skipped, so they don't fight the
-     * phone's. Its speed limit, cameras, traps, warning distances, lanes and driver-assist
-     * data still go through (phones carry none of that). Framework calls only: no app names.
+     * phone's; lane frames too (Korea Projection 2.3.0: the stock navigation sends them even
+     * with no route, and they mixed with the phone's). Its speed limit, cameras, traps, warning
+     * distances and driver-assist data still go through (phones carry none of that). Every call
+     * goes through again once the phone stops guiding. Framework calls only: no app names.
+     * With the debug log on, the icon, lane frame and 2C numbers it sends are logged (StockLog),
+     * skipped or not.
      */
     private void navigation(final ModContext mod, final LoadedApp app) {
         if (!mod.settingBoolean("tbt", true)) return;
-        MethodHook skip = new MethodHook() {
-            @Override
-            protected void beforeHookedMethod(Param p) {
-                if (Car.phoneGuiding(app.context)) p.setResult(null);
-            }
-        };
-        for (String m : NAVI_TBT) mod.hook(null, "framework.navigation_cluster." + m, skip);
-        mod.log("navigation: turn-by-turn yields to the phone in " + app.processName);
+        final StockLog seen = new StockLog(debug);
+        for (final String m : NAVI_TBT) {
+            mod.hook(null, "framework.navigation_cluster." + m, new MethodHook() {
+                @Override
+                protected void beforeHookedMethod(Param p) {
+                    boolean phone = Car.phoneGuiding(app.context);
+                    String line = seen.line(m, p.args, phone);
+                    if (line != null) mod.log(line);
+                    if (phone) p.setResult(null);
+                }
+            });
+        }
+        mod.log("navigation: turn-by-turn and lanes yield to the phone in " + app.processName
+                + (debug ? " (debug: stock values logged)" : ""));
     }
 
     /**
@@ -224,6 +253,13 @@ public final class Wireless extends ModEntry {
                                     hmgapi.hook.Cluster c = hmgapi.hook.Cluster.of(app.context);
                                     if (c == null) return;
                                     turns.put(receiver, t = new AaTurns(app.context, c, handler));
+                                    t.log = new AaTurns.Sink() {
+                                        @Override
+                                        public void line(String s) {
+                                            // the 300-line cap for the whole process, not per connection
+                                            if (aaTurnLogs.incrementAndGet() <= AaTurns.TURN_LOGS_MAX) mod.log(s);
+                                        }
+                                    };
                                     mod.log("Android Auto: turn-by-turn to the cluster for this connection");
                                 }
                             }

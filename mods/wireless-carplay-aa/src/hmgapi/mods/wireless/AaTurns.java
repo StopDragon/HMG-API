@@ -1,4 +1,13 @@
 package hmgapi.mods.wireless;
+// Modified by Korea Projection (StopDragon/HMG-API, branch korea-build), 2026-11-08 (mod 2.3.0,
+// "match the stock Korean navigation", 1.7.1 map 2-B, 2-E, 2-H):
+//   - ramps as the Korean stock GPM (GpmNaviTBTManager): on-ramp right/left/unknown 161/162/160,
+//     off-ramp 164/165/163 (the US build had 173/174/172 and 81/82/86); forks unchanged
+//   - the crossroad name only when it changes or every 10 s (as CpTurns)
+//   - a log line per turn ("AA: turn ev N side N angle N -> icon N"), numbers only, on change,
+//     up to 300 lines
+//   - HUD distance (2C): metres under 1 km; 65535 (invalid) for the points it has no distance for
+//     and when guidance ends, as the stock navigation
 
 import android.content.Context;
 import android.os.Handler;
@@ -43,6 +52,24 @@ final class AaTurns {
     final Context context;
     final Cluster cluster;
     final Handler handler;
+    /** where the turn log lines go (Wireless: the mod's log); null: none */
+    Sink log;
+    /** one log line (numbers only) */
+    interface Sink {
+        void line(String s);
+    }
+    /** turn log: the last values logged and how many lines so far */
+    String turnKey;
+    int turnLogs;
+    static final int TURN_LOGS_MAX = 300;
+    /** the crossroad name last sent and when; resent only when it changes or after CROSSROAD_MS */
+    String crossroad;
+    long crossroadAt;
+    static final long CROSSROAD_MS = 10000L;
+    /** the time (ms since boot); tests set clock */
+    long clock = -1L;
+    /** the 2C value for a point there isn't, and for guidance over (the stock navigation's) */
+    static final int HUD_NO_POINT = 65535;
     final Runnable tick = new Runnable() {
         @Override
         public void run() {
@@ -74,6 +101,20 @@ final class AaTurns {
         this.context = context;
         this.cluster = cluster;
         this.handler = handler;
+    }
+
+    long now() {
+        return clock >= 0L ? clock : android.os.SystemClock.elapsedRealtime();
+    }
+
+    /** the crossroad name, when it changed or CROSSROAD_MS after the last one (stock DiPO sends it with every update) */
+    void sendCrossroad(String name) {
+        String r = name == null ? "" : name;
+        long t = now();
+        if (r.equals(crossroad) && t - crossroadAt < CROSSROAD_MS) return;
+        cluster.crossroadName(name);
+        crossroad = r;
+        crossroadAt = t;
     }
 
     // ---- from the AA library
@@ -129,25 +170,25 @@ final class AaTurns {
                     cluster.destinationName(0, road);
                     distance = -1f;
                 } else {
-                    cluster.crossroadName(road);
+                    sendCrossroad(road);
                     setTurnType(ev, turnSide);
                 }
                 break;
             case NAME_CHANGE: case SLIGHT_TURN: case TURN: case SHARP_TURN: case STRAIGHT: case MERGE:
-                cluster.crossroadName(road);
+                sendCrossroad(road);
                 setTurnType(ev, turnSide);
                 break;
             case U_TURN:
                 if (side == UNSPECIFIED) turnSide = LEFT;
-                cluster.crossroadName(road);
+                sendCrossroad(road);
                 setTurnType(ev, turnSide);
                 break;
             case ON_RAMP: case OFF_RAMP: case FORK: case FERRY_BOAT:
-                cluster.crossroadName(road);
+                sendCrossroad(road);
                 setRampType(ev, turnSide);
                 break;
             case ROUNDABOUT_EXIT: case ROUNDABOUT_ENTER_AND_EXIT:
-                cluster.crossroadName(road);
+                sendCrossroad(road);
                 setRoundaboutType(ev, turnSide, turnAngle);
                 break;
             case DESTINATION:
@@ -191,6 +232,7 @@ final class AaTurns {
 
     void status(int s) {
         if (s == 1 || s == 3) {   // active, rerouting
+            if (!navLive) crossroad = null;   // a new route: the name goes out again
             navLive = true;
             return;
         }
@@ -205,6 +247,7 @@ final class AaTurns {
 
     /** The car's navigation took over (focus native): forget the turn. */
     void stop() {
+        crossroad = null;
         event = 0;
         road = null;
         turnSide = 0;
@@ -231,9 +274,20 @@ final class AaTurns {
             barErr = -2;
             if (displayType < 64) displayType = 2;
         }
+        logTurn();
         cluster.tbtInfo(displayType, 65535, direction, distance, 0, 0, unit, bar, barErr);
         sendHudList();
         sendHudDistance();
+    }
+
+    /** the turn's values (numbers only: no road names) when they change, up to TURN_LOGS_MAX lines */
+    void logTurn() {
+        if (log == null) return;
+        String k = event + " " + turnSide + " " + turnAngle + " " + displayType;
+        if (k.equals(turnKey) || turnLogs >= TURN_LOGS_MAX) return;
+        turnKey = k;
+        turnLogs++;
+        log.line("AA: turn ev " + event + " side " + turnSide + " angle " + turnAngle + " -> icon " + displayType);
     }
 
     /** Distance to the next turn, in the owner's unit (Settings) where the phone's differs. */
@@ -329,27 +383,28 @@ final class AaTurns {
         }
     }
 
+    /** ramps as the Korean stock GPM: highway entry 160-162, highway exit 163-165 (the stock engine's) */
     void setRampType(int ev, int side) {
         if (ev == ON_RAMP) {
             if (side == RIGHT) {
-                displayType = 173;
+                displayType = 161;
                 direction = 30;
             } else if (side == LEFT) {
-                displayType = 174;
+                displayType = 162;
                 direction = 330;
             } else {
-                displayType = 172;
+                displayType = 160;
                 direction = 0;
             }
         } else if (ev == OFF_RAMP) {
             if (side == RIGHT) {
-                displayType = 81;
+                displayType = 164;
                 direction = 30;
             } else if (side == LEFT) {
-                displayType = 82;
+                displayType = 165;
                 direction = 330;
             } else {
-                displayType = 86;
+                displayType = 163;
                 direction = 0;
             }
         } else if (ev == FORK) {
@@ -420,20 +475,30 @@ final class AaTurns {
         hudRoad = r;
     }
 
-    /** The HUD's distance: whole number (up to 4095) and tenths for km/mi. */
+    /**
+     * The HUD's distance: whole number (up to 4095) and tenths for km/mi; under 1 km in metres, as the
+     * stock navigation. The 2nd and 3rd points are HUD_NO_POINT: the turns ahead come at other times
+     * and their distance isn't known to be from the car (1.7.1: not filled for Android Auto).
+     */
     void sendHudDistance() {
         float d = distance;
         int u = unit;
         if (d < 0f || u < 0 || u > 4) return;
-        int whole = Math.min((int) d, 4095);
-        int tenths = 0;
-        if (u == Cluster.UNIT_KM || u == Cluster.UNIT_MI) tenths = Math.max(0, Math.min(9, (int) ((d - whole) * 10f + 0.5f)));
-        cluster.tbtSubInfo2C(u, tenths, whole, 0, 0, 0, 0, 0, 0);
+        int whole, tenths = 0;
+        if (u == Cluster.UNIT_KM && d < 1f) {
+            u = Cluster.UNIT_M;
+            whole = (int) (d * 1000f + 0.5f);
+        } else {
+            whole = Math.min((int) d, 4095);
+            if (u == Cluster.UNIT_KM || u == Cluster.UNIT_MI) tenths = Math.max(0, Math.min(9, (int) ((d - whole) * 10f + 0.5f)));
+        }
+        cluster.tbtSubInfo2C(u, tenths, whole, 0, 0, HUD_NO_POINT, 0, 0, HUD_NO_POINT);
     }
 
     void hudBlank() {
         laneKey = "";
-        cluster.tbtSubInfo2C(0, 0, 0, 0, 0, 0, 0, 0, 0);
+        crossroad = null;
+        cluster.tbtSubInfo2C(0, 0, HUD_NO_POINT, 0, 0, HUD_NO_POINT, 0, 0, HUD_NO_POINT);
         byte[] lanes = new byte[81];
         lanes[0] = LANES;
         cluster.laneInfo(lanes);
