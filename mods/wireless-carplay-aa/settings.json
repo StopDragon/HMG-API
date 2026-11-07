@@ -23,6 +23,14 @@
       "apply": "rebuild"
     },
     {
+      "key": "now_playing",
+      "type": "toggle",
+      "default": true,
+      "title": "Song info on wireless CarPlay (cluster, media widget)",
+      "apply": "restart",
+      "description": "DiPO only asks the iPhone for song info on USB; HMG-API asks on wireless too. A hook in DiPO (no files changed)."
+    },
+    {
       "key": "menu",
       "type": "toggle",
       "default": true,

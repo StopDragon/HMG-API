@@ -261,6 +261,7 @@ final class Bridge {
             sCpWireless = false;
             sCpClient = false;
             sCpConnected = false;
+            NOW_PLAYING.reset();
             synchronized (sPendingIn) {
                 sPendingIn.clear();
             }
@@ -282,11 +283,34 @@ final class Bridge {
     static boolean dipoDropNoti(int what) {
         boolean drop = sCpClient && (what == NOTI_IDENTIFICATION_ACCEPTED || what == NOTI_TRANSPORT_IDENTIFIER);
         if (drop) log("DiPO: dropping iAP2 noti " + what + " from the CarPlay-channel session");
+        if (drop && NOW_PLAYING.due(Dipo.nowPlaying, sCpClient, what)) startNowPlaying(NOW_PLAYING.session(), 1);
         return drop;
+    }
+
+    /** song info on wireless: DiPO skips it (NowPlaying) */
+    static final NowPlaying NOW_PLAYING = new NowPlaying();
+
+    private static void startNowPlaying(final int session, final int tryNo) {
+        handler().postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                final IIap2Service s = sIap2;
+                String r = NOW_PLAYING.attempt(session, tryNo, sCpClient, new NowPlaying.Server() {
+                    @Override
+                    public boolean start() throws Exception {
+                        if (s == null) return false;
+                        return s.Iap2SvcNowPlayingStart();
+                    }
+                });
+                if (r == null) startNowPlaying(session, tryNo + 1);
+                else if (!r.isEmpty()) log(r);
+            }
+        }, NowPlaying.DELAY_MS);
     }
 
     static void startCpClient(final String why) {
         if (sCpClient) return;
+        NOW_PLAYING.reset();
         sCpClient = true;
         sCpConnected = false;
         final String addr = sAddr;
@@ -521,6 +545,7 @@ final class Bridge {
                 sSession = false;
             } else if (component == COMPONENT_CARPLAY_CLIENT) {
                 sCpConnected = false;
+                NOW_PLAYING.reset();
             }
         }
 
