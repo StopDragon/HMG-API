@@ -36,7 +36,7 @@
       "default": true,
       "title": "Settings > Phone Projection opens Device Connections",
       "apply": "restart",
-      "description": "A hook in the Settings app (no files changed). US/Canada only; other regions keep the stock choice."
+      "description": "A hook in the Settings app (no files changed). US/Canada only; other regions keep the stock choice. Not in the Korean build (its hook point is missing on some Korean firmware)."
     },
     {
       "key": "usb_drives",

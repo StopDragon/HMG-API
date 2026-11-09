@@ -21,12 +21,16 @@ import hmgapi.hook.ModContext;
  *
  * 패키지가 우리 AP를 돌리고 차주가 켜기 파일을 둔 동안에만 시스템 속성 sys.kp.aa_ap=1을 건다(재부팅하면
  * 사라짐). 이 값이 1일 때만, 이 두 앱의 프로세스 안에서만:
- *  - isWifiApEnabled() → true, getWifiApMode() → 2
- *  - setWifiApEnabledForConnectivity·setWifiApEnabled → 순정 Wi-Fi 서비스를 부르지 않고 true
- *    (PhoneProjection은 AP가 켜져 있다고 보면 끄고 다시 켜려 한다: 순정 Wi-Fi 서비스가 우리 AP·드라이버를
- *    건드리지 않게 막는다)
- *  - setWifiApConfiguration → 저장하지 않고 true(PhoneProjection의 비밀번호 새로 만들기가 softap.conf를 바꾸면
- *    우리 hostapd는 옛 비밀번호를 쓰고 폰에는 새 비밀번호가 가서 카플레이까지 끊긴다, 리뷰 M3)
+ *  - isWifiApEnabled() → true, getWifiApMode() → 2 (실제로 효과가 있는 것은 이 둘이다)
+ *  - setWifiApEnabledForConnectivity·setWifiApEnabled·setWifiApConfiguration → 순정 Wi-Fi 서비스를 부르지 않고
+ *    true. 1.7.2 분석(계획 M-10, 2026-11-08 KST)으로는 GPM·PhoneProjection 어느 쪽도 이 셋을 부르지 않는다.
+ *    그래서 지금은 효과가 없는 예비 안전장치다. 다른 펌웨어나 다른 경로에서 불리더라도 순정 Wi-Fi 서비스가
+ *    우리 AP·드라이버·softap.conf를 건드리지 않게 남겨 둔다(값이 1일 때만 막으므로 순정 동작에는 영향이 없고,
+ *    로그의 "N of 5" 개수도 그대로다).
+ *  - 주의: 순정 "키 생성"(비밀번호 새로 만들기)은 setWifiApConfiguration으로 오지 않는다. PhoneProjection이
+ *    WifiManager.renewPasskey()를 따로 부르고, Wi-Fi 서비스 안의 WifiApConfigStore.renewPasskey()가
+ *    softap.conf의 카플레이 SSID와 비밀번호를 둘 다 새로 만든다(계획 V-1, 직접 확인). 이 훅은 그것을 막지 못한다.
+ *    그 대응은 패키지의 softap.conf 변경 감시(계획 P-3)가 맡는다.
  * 값이 1이 아니면 원래 메서드를 그대로 부른다. 카플레이(DiPO·Iap2) 프로세스에는 걸지 않는다.
  *
  * AOSP 이름 그대로인 메서드라 HMG-API 지도 점이 없다. 그래서 Hooks.findAndHookMethod로 직접 걸고,
@@ -84,7 +88,10 @@ final class AaWifi {
         }
     }
 
-    /** setWifiApEnabled*(WifiConfiguration, boolean)과 setWifiApConfiguration(WifiConfiguration): 우리 AP가 도는 동안 막는다 */
+    /**
+     * setWifiApEnabled*(WifiConfiguration, boolean)과 setWifiApConfiguration(WifiConfiguration): 우리 AP가 도는 동안
+     * 막는다. 지금 GPM·PhoneProjection은 부르지 않는 예비 안전장치다(renewPasskey는 막지 못함, 클래스 설명 참고).
+     */
     private static int hookSet(final ModContext mod, final String name) {
         try {
             MethodHook h = new MethodHook() {

@@ -7,6 +7,8 @@ import java.util.List;
 public final class Cluster {
     public static final int UNIT_M = 0, UNIT_KM = 1, UNIT_MI = 2, UNIT_FT = 3, UNIT_YD = 4;
     public final List<String> calls = new ArrayList<String>();
+    /** 1.7.2(M-2): HUD 목록 프레임 그대로(hex는 끝의 0을 빼므로 {F2,00}과 {F2}를 가르려고) */
+    public final List<byte[]> hudFrames = new ArrayList<byte[]>();
 
     void rec(String s) { calls.add(s); }
     static String hex(byte[] b) {
@@ -25,7 +27,7 @@ public final class Cluster {
     public void tbtSubInfo2C(int a, int b, int c, int d, int e, int f, int g, int h, int i) {
         rec("2c " + a + " " + b + " " + c + " " + d + " " + e + " " + f + " " + g + " " + h + " " + i);
     }
-    public void turnListNew(byte[] f) { rec("hud " + hex(f)); }
+    public void turnListNew(byte[] f) { rec("hud " + hex(f)); hudFrames.add(f.clone()); }
     public void laneInfo(byte[] f) { rec("lanes " + hex(f)); }
     public void destinationName(int type, String name) { rec("dest " + type + " [" + name + "]"); }
     public void crossroadName(String name) { rec("road [" + name + "]"); }

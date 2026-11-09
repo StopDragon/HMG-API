@@ -1,4 +1,14 @@
 package hmgapi.mods.wireless.dipo;
+// Modified by Korea Projection (StopDragon/HMG-API, branch korea-build), 2026-11-08 (모드 2.3.1 판 그대로, 계획 M-9):
+//   - SPP 연결을 한 번만 부르지 않고 SppRetry로 3번까지 시도한다(false면 5초, true인데 안 열리면 10초 뒤).
+//     SPP가 열리거나, 세션·USB·무선 카플레이 중이거나, 블루투스가 끊기거나, 새 연결 이벤트가 오면 멈춘다.
+//     이 줄들의 로그에는 기기 주소를 넣지 않는다(숫자만).
+//   - (리뷰 반영) 실행 한 번을 SppRetry.run으로 옮겨 시험이 실제 코드를 부르게 했다. 재시도 중 폴링으로 SPP가
+//     열린 것을 보면 세션을 시작한다. 새 연결 이벤트와 겹친 옛 체인은 다시 걸지 않는다.
+//   - (리뷰 반영) 기존 로그의 기기 주소도 가린다(mask, 2차 리뷰 6부터 모두 가림 xx:xx:xx:xx:xx:xx).
+// Korea Projection 1.7.2 수정(2026-11-09, 계획 P-7 모드 부분):
+//   - ensureHotspot: 우리 AP(패키지 hostapd)가 이미 돌면 순정 AP 켜기를 부르지 않는다(순정 "이미 켜짐(모드 2)" 건너뛰기와
+//     같은 모양, ApCheck). 그래서 세션마다 wifi_ap_on이 1로 다시 써지지 않는다. 로그는 한 줄, 주소는 남기지 않는다.
 
 import android.bluetooth.BluetoothDevice;
 import android.content.Context;
@@ -72,6 +82,11 @@ final class Bridge {
 
     static void log(String m) {
         Dipo.log("bridge: " + m);
+    }
+
+    /** 로그용 기기 주소 가리기(모두 가림, Mac.mask) */
+    static String mask(String a) {
+        return Mac.mask(a);
     }
 
     static void error(String m, Throwable t) {
@@ -154,25 +169,72 @@ final class Bridge {
         }
     }
 
+    /** SPP 연결 재시도 상태(M-9, 연결 이벤트마다 새로 센다) */
+    static final SppRetry SPP_RETRY = new SppRetry();
+
     static void scheduleSppConnect(final String addr) {
         if (addr == null || !enabled() || sUsb || sSession || sCpWireless) return;
+        sppTry(addr, SPP_RETRY.start(), SPP_CONNECT_DELAY_MS);
+    }
+
+    /**
+     * delay 뒤 SPP 연결을 한 번 시도한다(M-9). 결과에 따라 SppRetry가 정한 간격으로 다시 걸고, 멈출 조건이면
+     * 끝낸다. 횟수가 정해져 있어 끝나지 않는 반복은 없다. 효과는 불확실하다(BTCM이 헤드유닛 쪽 SPP를 거절하는
+     * 경우가 있었다, SppRetry 설명).
+     */
+    static void sppTry(final String addr, final int gen, long delay) {
         handler().postDelayed(new Runnable() {
             @Override
             public void run() {
                 try {
-                    HfDeviceBTCMManager m = sBtcm;
-                    if (m == null || sUsb || sSession || sCpWireless || !enabled()) return;
-                    if (m.IbtcmIsSppConnectedDevice(addr)) log("SPP already up for " + addr);
-                    else log("IbtcmSppConnect(" + addr + ") = " + m.IbtcmSppConnect(addr));
+                    final HfDeviceBTCMManager m = sBtcm;
+                    boolean busy = m == null || sUsb || sSession || sCpWireless || !enabled();
+                    SppRetry.Step st = SPP_RETRY.run(gen, busy, new SppRetry.Btcm() {
+                        @Override
+                        public boolean sppUp() {
+                            return m.IbtcmIsSppConnectedDevice(addr);
+                        }
+
+                        @Override
+                        public boolean btConnected() {
+                            return Bridge.btConnected(m, addr);
+                        }
+
+                        @Override
+                        public boolean connect() {
+                            return m.IbtcmSppConnect(addr);
+                        }
+                    });
+                    String line = st.line();
+                    if (line != null) log(line);
+                    // 재시도 중 폴링으로 SPP가 열린 것을 봤는데 상태 콜백이 아직 없으면 세션을 시작한다(리뷰 7).
+                    // onSppUp이 세션·USB·무선 카플레이 조건을 다시 본다. 첫 시도(원래 동작)는 그대로 둔다.
+                    if (st.decision == SppRetry.UP && st.tries > 0 && !sSession) onSppUp(addr);
+                    if (st.next > 0) sppTry(addr, gen, st.next);
                 } catch (Throwable t) {
                     error("sppConnect", t);
                 }
             }
-        }, SPP_CONNECT_DELAY_MS);
+        }, delay);
     }
 
-    static void onSppUp(final String addr) {
+    /** 그 기기의 블루투스(HFP)가 아직 붙어 있는지. 알 수 없으면 false(재시도를 멈춘다: 원래처럼 한 번만 시도한 셈) */
+    static boolean btConnected(HfDeviceBTCMManager m, String addr) {
+        try {
+            BluetoothDevice d = m.IbtcmGetHfpConnectedDevice();
+            return d != null && addr.equals(d.getAddress());
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /**
+     * SPP가 열렸다: 세션을 시작한다. 재시도 폴링(sppTry)과 BTCM 상태 콜백이 거의 동시에 부를 수 있어, sSession 검사와
+     * 설정을 한 번에 하도록 synchronized로 둔다(2차 리뷰 7: BT_ATTACHED가 두 번 나가지 않게).
+     */
+    static synchronized void onSppUp(final String addr) {
         if (addr == null || sSession) return;
+        SPP_RETRY.cancel();   // SPP가 열렸다: 남은 재시도는 버린다(M-9)
         sAddr = addr;
         if (sCpClient || sCpWireless || !enabled() || sUsb) return;
         sSession = true;
@@ -193,7 +255,7 @@ final class Bridge {
                     i.putExtra("component", COMPONENT_BT_CARPLAY);
                     i.putExtra("serial", addr);
                     c.sendBroadcast(i);
-                    log("BT_ATTACHED sent for " + addr);
+                    log("BT_ATTACHED sent for " + mask(addr));
                 } catch (Throwable t) {
                     sSession = false;
                     error("onSppUp", t);
@@ -220,7 +282,7 @@ final class Bridge {
 
     static void onCpSessionCreated(Object cp) {
         if (cp != null) sCp = cp;
-        log("CarPlay session created (usb=" + sUsb + " btAddr=" + sAddr + ")");
+        log("CarPlay session created (usb=" + sUsb + " btAddr=" + mask(sAddr) + ")");
         if ("created".equals(prop("persist.ev6.cpwl.handover", "data")) && !sUsb && sAddr != null) {
             startCpClient("session created");
         }
@@ -477,8 +539,13 @@ final class Bridge {
             } catch (Throwable t) {
                 mode = -1;
             }
-            if (on && mode == 2) {
+            int d = ApCheck.decide(on, mode, prop(ApCheck.AA_AP_PROP, ""), wlanAddrs());
+            if (d == ApCheck.SKIP_STOCK_ON) {
                 log("hotspot already up (mode 2)");
+                return;
+            }
+            if (d == ApCheck.SKIP_OURS) {
+                log("our hotspot already up, stock AP-on skipped (was on=" + on + " mode=" + mode + ")");
                 return;
             }
             Object conf = k.getMethod("getWifiApConfiguration").invoke(wifi);
@@ -489,6 +556,22 @@ final class Bridge {
         }
     }
 
+    /** wlan0의 IPv4 주소들(우리 AP 확인용, 로그에 남기지 않음). 읽지 못하면 null */
+    static String[] wlanAddrs() {
+        try {
+            java.net.NetworkInterface ni = java.net.NetworkInterface.getByName("wlan0");
+            if (ni == null) return null;
+            ArrayList<String> r = new ArrayList<String>();
+            for (java.util.Enumeration<java.net.InetAddress> e = ni.getInetAddresses(); e.hasMoreElements();) {
+                java.net.InetAddress a = e.nextElement();
+                if (a instanceof java.net.Inet4Address) r.add(a.getHostAddress());
+            }
+            return r.toArray(new String[r.size()]);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
     /** Broadcom's status callbacks: an iPhone connects (start SPP), SPP up/down, SPP data */
     static final class BtListener extends HfDeviceStatusListener {
         @Override
@@ -496,7 +579,7 @@ final class Bridge {
             if (event != EVENT_BTCM_CONNECTED) return;
             try {
                 if (isApple(d)) {
-                    log("iPhone BT connected: " + d.getAddress());
+                    log("iPhone BT connected: " + mask(d.getAddress()));
                     scheduleSppConnect(d.getAddress());
                 }
             } catch (Throwable t) {
@@ -510,7 +593,7 @@ final class Bridge {
             try {
                 if (!isApple(d)) return;
                 String addr = d.getAddress();
-                log("SPP status " + status + " for " + addr);
+                log("SPP status " + status + " for " + mask(addr));
                 if (status == SPP_CONNECTED) onSppUp(addr);
                 else if (status == SPP_DISCONNECTED) onSppDown(addr);
             } catch (Throwable t) {

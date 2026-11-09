@@ -58,6 +58,11 @@ public final class Dipo {
     static LoadedApp app;
     static volatile IIap2Service iap2;
     static boolean tbt, bridge;
+    /**
+     * Korea Projection의 디버그 로그가 켜졌는지(1.7.2 진단). Wireless가 zygote에서 읽은 값을 start 전에 넣는다
+     * (이 부분은 클래스 로더가 달라 Wireless.debug를 직접 읽지 못한다).
+     */
+    public static volatile boolean debug;
     /** song info on wireless (NowPlaying), see NowPlaying */
     static volatile boolean nowPlaying;
     static Handler turnsHandler;
@@ -132,6 +137,8 @@ public final class Dipo {
                 restartRouteGuidance();
             }
         });
+        // Korea Projection 1.7.2(차-5 뒤): 디버그 로그가 켜졌으면 곧 회전 판단 진단 줄을 남긴다(CpTurns.diag, 숫자만)
+        turns.debug = debug;
         // Korea Projection (korea-build): resend the last turn-by-turn about every second while it's
         // on (CpTurns.refresh); the tick ends itself once CpTurns isn't active (state 0, stop, a
         // disconnect, a new source app, or 5 minutes without the phone)
@@ -351,7 +358,8 @@ public final class Dipo {
                 if (id == null || p.getResult() != null) return;
                 p.setResult(id);
                 if (id.isEmpty()) NO_ADDRESS.set(Boolean.TRUE);
-                log("bridge: no iAP2 Bluetooth address on session details, using the session's (" + (id.isEmpty() ? "none, keeping the stored one" : id) + ")");
+                // Korea Projection 1.7.2: 주소는 모두 가린다(Bridge.mask)
+                log("bridge: no iAP2 Bluetooth address on session details, using the session's (" + (id.isEmpty() ? "none, keeping the stored one" : Bridge.mask(id)) + ")");
             }
         });
         mod.hook(cl, "dipo.bt.set_carplay_bt_address", new MethodHook() {
@@ -376,7 +384,7 @@ public final class Dipo {
                 if (id == null) return;
                 try {
                     SharedPreferences sp = c.getSharedPreferences("pref_dipo", 0);
-                    if (!sp.edit().putBoolean(id, true).commit()) log("bridge: first-connect notice not saved for " + id);
+                    if (!sp.edit().putBoolean(id, true).commit()) log("bridge: first-connect notice not saved for " + Bridge.mask(id));   // 주소는 가린다(2차 리뷰 6)
                 } catch (Throwable t) {
                     error("bridge: first-connect notice", t);
                 }

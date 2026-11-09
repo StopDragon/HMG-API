@@ -8,6 +8,26 @@ package hmgapi.mods.wireless;
 //     up to 300 lines
 //   - HUD distance (2C): metres under 1 km; 65535 (invalid) for the points it has no distance for
 //     and when guidance ends, as the stock navigation
+// Korea Projection 1.7.2 수정(2026-11-08, 모드 2.3.1 판 그대로, 계획 M-3·M-14):
+//   - 회전은 순정 "멀리 있음" 값으로 보낸다: 막대 0·barErr -1(막대 32 고정 대신), 옆길 0(65535 대신), 방향 0
+//   - 포커스가 순정 내비로 넘어가면(stop) 안내 중이었을 때 계기판을 지운다(release, 카플레이 M-2와 같은 값)
+//   - 지우기 값: 표시 8(0 대신), 거리 무효 -3, 단위 15, 막대 무효 -1, 2C (단위 15, 소수 15, 정수 65535) x 3
+// Korea Projection 1.7.2 수정(2026-11-08, 계획 M-15):
+//   - HUD 목록 이름을 UTF-16LE 78바이트 안에서 글자 경계로 자른다(이모지 같은 서로게이트 쌍을 반으로 자르지 않음)
+//   - 도로 이름 끝 글자 깨짐("우회전" → "우회쀀")의 원인은 AA 라이브러리 레시피(aa-tbt-*)의 UTF-8 자르기였다(레시피에서 고침)
+// Korea Projection 1.7.2 수정(2026-11-09, 계획 M-2 HUD·M-12·M-11, 소유자 결정 2026-11-09 "순정대로"):
+//   - 곧 회전 화면(M-12, 카플레이 M-4와 같은 규칙): AA가 차로(이벤트 34)를 준 회전만, 남은 거리가 D(일반 350m,
+//     출구 1050m, 처음 거리가 더 짧으면 그 거리) 안이면 순정 근거리 값(13·31·17/18·25, 회전교차로는 출구 아이콘)과
+//     방향·나가는 길 옆길 비트·막대를 보낸다. AA는 교차로의 다른 길 각도를 주지 않아 옆길은 나가는 길 비트뿐이다
+//   - 도로 이름은 곧 회전일 때만 보내고 멀리 있을 때는 빈 이름(순정)
+//   - 재탐색(상태 3)은 순정 표시 10(방향·옆길·거리 무효, 2C·HUD 목록 지우기). 상태 1로 돌아오면 보통 회전 표시로.
+//     AA에는 "경로 계산 중" 상태가 없어 표시 9는 보내지 않는다
+//   - HUD 목록(M-2): 빈 목록 {F2,00}, 아이콘 3칸(셋째 칸은 그다음 회전). updateRemainDis는 보내지 않는다(M-11)
+// Korea Projection 1.7.2 수정(2026-11-09, 소유자 결정 "D 안의 모든 회전"): 곧 회전 화면에서 차로(이벤트 34) 조건을 뺐다.
+//   남은 거리(m)가 D 안이고 큰 그림이 있는 회전이면 곧 회전이다(카플레이 CpTurns와 같은 규칙). 위 M-12의 "차로를 준 회전만"은 바뀌었다
+// Korea Projection 1.7.2 시험판 3(2026-11-09, 모드 2.3.3, 순정 내비 운행 로그 기준):
+//   - 막대를 순정 단속 정보 프레임의 막대 칸에도 넣는다(PhoneBar 방송 → 순정 내비 프로세스). 순정은 두 곳에 같은 값을 보낸다
+//   - D는 고정(350m·1050m, 처음 거리가 짧아도 줄이지 않음), 막대 최대 90(순정 값). 위의 "처음 거리가 더 짧으면 그 거리"는 바뀌었다
 
 import android.content.Context;
 import android.os.Handler;
@@ -50,6 +70,8 @@ final class AaTurns {
     static final byte HUD_LIST = (byte) 0xF2, LANES = (byte) 0xF1;
 
     final Context context;
+    /** 곧 회전 막대를 순정 내비 프로세스로 알린다(순정 단속 정보 프레임의 막대 칸, 1.7.2 시험판 3) */
+    final PhoneBar.Sender barOut = new PhoneBar.Sender();
     final Cluster cluster;
     final Handler handler;
     /** where the turn log lines go (Wireless: the mod's log); null: none */
@@ -70,6 +92,35 @@ final class AaTurns {
     long clock = -1L;
     /** the 2C value for a point there isn't, and for guidance over (the stock navigation's) */
     static final int HUD_NO_POINT = 65535;
+    /**
+     * 순정 무안내 회전 값(M-14, 카플레이 CpTurns M-2와 같음): 표시 8(안내 없음), 거리 무효(distanceErr -3),
+     * 단위 15, 막대 무효(barErr -1). 안내 끝 2C 한 칸은 단위 15, 소수 15, 정수 65535(순정 setClusterClearData).
+     */
+    static final int CLEAR_ICON = 8, CLEAR_DIST_ERR = -3, CLEAR_UNIT = 15, HUD_CLEAR_UNIT = 15, HUD_CLEAR_TENTHS = 15;
+    /**
+     * 남은 거리·시간(updateTBTSubInfo) 지우기 값: 순정 엔진은 0xFF·거리 0xFFFF를 넣고, 서비스가 범위 밖 값을
+     * 시간 종류·형식 3, 단위 15로 바꾼다. 도착 지점 종류는 9인자판 기본값 15(없음)를 쓴다.
+     */
+    static final int CLEAR_TIME = 3, CLEAR_EST_POINT = 15;
+    /**
+     * 멀리 있음 값(M-3): 순정 엔진은 "곧 회전"(교차로 확대도·표지판 안내 중)일 때만 막대 1~10·방향·옆길을 넣고,
+     * 그 밖은 막대 15(barErr -1)·방향 0xFF·combi 15·옆길 0이다. NavigationCluster는 방향 0..360·combi 0..4만
+     * 받으므로(밖이면 0) 방향 0·combi 0으로 보낸다. 1.7.2(M-12): 차로가 있는 회전이 D 안이면 곧 회전 값(near)을 보내고,
+     * 그 밖은 이 값이다. 회전교차로의 곧 회전 방향은 direction 필드에서 온다.
+     */
+    static final int BAR_FAR = 0, BAR_FAR_ERR = -1;
+    /** AA NavigationStatus: 1 안내 중, 3 재탐색(그 밖 0 없음, 2 안내 안 함). 재탐색은 순정 표시 10 */
+    static final int STATUS_ACTIVE = 1, STATUS_REROUTING = 3, DISPLAY_RESEARCH = 10;
+    /** 곧 회전 D(m): 순정 교차로 확대 안내 단계 5 + MarginalDist 50(차-1). 차 속도는 모드에서 못 읽어 보정하지 않는다 */
+    static final int D_GENERAL = 350, D_EXPRESSWAY = 1050;
+    static final int NEAR_TURN = 13, NEAR_UTURN = 31, NEAR_EXIT_RIGHT = 17, NEAR_EXIT_LEFT = 18, NEAR_FORK = 25;
+    /** 마지막 차로 프레임의 차로 수(이벤트 34). 1 이상이면 이 회전에 차로 안내가 있다(M-12) */
+    int laneCount;
+    /** 다음 회전까지 남은 거리(m, 폰 값 그대로, 없으면 -1)와 이 회전의 처음 거리·열쇠(D 정하기) */
+    int remainMeters = -1, nearFirst;
+    String nearKey;
+    /** 재탐색 표시(10)를 보내는 중 */
+    boolean rerouting;
     final Runnable tick = new Runnable() {
         @Override
         public void run() {
@@ -82,13 +133,38 @@ final class AaTurns {
     String road;
     float distance;
     boolean navLive;
+    /**
+     * stop()가 계기판을 지운 뒤 아직 계기판에 아무것도 보내지 않았다(1.7.2). 그동안 포커스 신호가 다시 오거나
+     * 연결·경로가 끝나도 같은 지우기를 또 보내지 않는다(그 사이 순정 내비가 보낸 값을 지우지 않게, 리뷰 1·3).
+     * 계기판에 실제로 보낼 때만(sent) 풀린다. 내비 메시지·앞쪽 회전 저장처럼 보내지 않는 이벤트로는 풀리지 않는다.
+     */
+    boolean clearedByStop;
+
+    /**
+     * 포커스가 순정 내비에 있다(stop 뒤, 2차 리뷰 3). 그동안 폰 이벤트는 상태만 저장하고 계기판에는 보내지 않는다.
+     * 순정 값을 아이콘 0·폰 거리로 덮지 않게 한다. 포커스가 폰으로 돌아오면(focusPhone) 다시 보낸다.
+     */
+    boolean focusNative;
+
+    /** 포커스가 폰(프로젝션)으로 돌아왔다: 다시 계기판에 보낸다. 기억한 목적지 이름은 바로 다시 보낸다 */
+    void focusPhone() {
+        if (!focusNative) return;
+        focusNative = false;
+        if (navLive && destName != null && destName.length() > 0) sendDestName();
+        if (navLive && rerouting) sendRerouting();
+    }
+
+    /** 계기판에 무언가를 실제로 보냈다: 다음 stop·경로 끝에서는 다시 지운다 */
+    private void sent() {
+        clearedByStop = false;
+    }
     // destination and the remaining trip
     String destName;
     int estPoint;
     int tripMeters = -1, tripSeconds = -1, tripUnit, tripGen, sentGen;
     int lastUsm = -2;
     // HUD turn list (what was sent last)
-    int hudType = -1, hudNext;
+    int hudType = -1, hudNext, hudThird;
     boolean hudFresh;
     String hudRoad, laneKey;
     // the turns ahead (index 0..2)
@@ -109,10 +185,12 @@ final class AaTurns {
 
     /** the crossroad name, when it changed or CROSSROAD_MS after the last one (stock DiPO sends it with every update) */
     void sendCrossroad(String name) {
+        if (focusNative) return;
         String r = name == null ? "" : name;
         long t = now();
         if (r.equals(crossroad) && t - crossroadAt < CROSSROAD_MS) return;
         cluster.crossroadName(name);
+        sent();
         crossroad = r;
         crossroadAt = t;
     }
@@ -159,6 +237,8 @@ final class AaTurns {
         }
         hudFresh = false;
         boolean first = road == null;
+        // 다른 회전이 왔다: 남은 거리는 앞 회전의 것이므로 새 거리가 올 때까지 곧 회전을 판단하지 않는다(리뷰 1)
+        if (ev != event || side != turnSide || angle != turnAngle || !(str == null ? road == null : str.equals(road))) remainMeters = -1;
         event = ev;
         road = str;
         turnSide = side;
@@ -167,28 +247,26 @@ final class AaTurns {
         switch (ev) {
             case DEPART:
                 if (first) {
-                    cluster.destinationName(0, road);
+                    if (!focusNative) {
+                        cluster.destinationName(0, road);
+                        sent();
+                    }
                     distance = -1f;
                 } else {
-                    sendCrossroad(road);
                     setTurnType(ev, turnSide);
                 }
                 break;
             case NAME_CHANGE: case SLIGHT_TURN: case TURN: case SHARP_TURN: case STRAIGHT: case MERGE:
-                sendCrossroad(road);
                 setTurnType(ev, turnSide);
                 break;
             case U_TURN:
                 if (side == UNSPECIFIED) turnSide = LEFT;
-                sendCrossroad(road);
                 setTurnType(ev, turnSide);
                 break;
             case ON_RAMP: case OFF_RAMP: case FORK: case FERRY_BOAT:
-                sendCrossroad(road);
                 setRampType(ev, turnSide);
                 break;
             case ROUNDABOUT_EXIT: case ROUNDABOUT_ENTER_AND_EXIT:
-                sendCrossroad(road);
                 setRoundaboutType(ev, turnSide, turnAngle);
                 break;
             case DESTINATION:
@@ -225,28 +303,73 @@ final class AaTurns {
             sendRemain();
             return;
         }
+        remainMeters = meters;
         setDistance(meters, e3, unitFlags);
         setTurnType(event, turnSide);
         sendTurn();
     }
 
     void status(int s) {
-        if (s == 1 || s == 3) {   // active, rerouting
-            if (!navLive) crossroad = null;   // a new route: the name goes out again
+        if (s == STATUS_ACTIVE || s == STATUS_REROUTING) {   // active, rerouting
+            if (!navLive) {
+                crossroad = null;   // a new route: the name goes out again
+                // 새 경로: 옛 경로의 남은 거리로 곧 회전을 띄우지 않는다(소유자 결정 11-09 뒤 리뷰, 차로 조건이 막던 것)
+                remainMeters = -1;
+                nearKey = null;
+            }
             navLive = true;
+            if (s == STATUS_REROUTING && !rerouting) {
+                rerouting = true;
+                nearKey = null;
+                // 재탐색: 새 경로의 거리가 올 때까지 곧 회전을 판단하지 않는다(옛 경로 거리로 큰 그림이 나오지 않게)
+                remainMeters = -1;
+                // 새 경로: 차로는 다시 온 것만 센다(리뷰 2). 포커스와 상관없이 비우고, 재탐색 뒤 같은 차로 프레임도 다시 나가게 한다
+                laneCount = 0;
+                laneKey = "";
+                if (log != null) log.line("AA: rerouting, display " + DISPLAY_RESEARCH);
+                sendRerouting();
+            } else if (s == STATUS_ACTIVE && rerouting) {
+                // 재탐색이 끝났다: 기억한 회전이 있으면 보통 표시로 바로 돌아간다(HUD 목록은 지웠으므로 다시 나간다)
+                rerouting = false;
+                if (log != null) log.line("AA: rerouting over");
+                if (event != 0 || displayType != 0) sendTurn();
+            }
             return;
         }
+        rerouting = false;
         handler.removeCallbacks(tick);
         destName = null;
         navLive = false;
+        remainMeters = -1;
+        nearKey = null;
         tripMeters = -1;
         tripSeconds = -1;
         estPoint = 0;
-        release();
+        // 포커스가 순정이면 계기판은 순정 것이다: 그동안 보낸 것이 없으므로 지우지 않는다(2차 리뷰 3)
+        if (!clearedByStop && !focusNative) release();
+        clearedByStop = false;
     }
 
-    /** The car's navigation took over (focus native): forget the turn. */
+    /**
+     * The car's navigation took over (focus native): forget the turn. 1.7.2(M-14): 안내 중이었으면 계기판도
+     * 지운다(release). 지우지 않으면 순정 엔진이 "바뀔 때만" 보내므로 폰의 마지막 회전이 남는다. 경로 자체는
+     * 폰에서 이어지므로 navLive는 그대로 두어, 포커스가 폰으로 돌아오면 다음 회전부터 다시 보낸다.
+     */
     void stop() {
+        // 막대 칸은 순정 값으로 되돌린다(포커스가 순정으로 넘어감)
+        PhoneBar.send(context, barOut, PhoneBar.NONE, now());
+        boolean was = focusNative;
+        focusNative = true;
+        remainMeters = -1;
+        nearKey = null;
+        if (!was && navLive && !clearedByStop) {
+            // 포커스 신호가 다시 와도(그 사이 보낸 것이 없으면) 다시 지우지 않는다(리뷰 1)
+            // 남은 거리 확인(250ms)도 멈춘다. 폰이 남은 거리를 다시 보내면 sendRemain이 다시 건다.
+            // release가 destName을 비우므로, 폰이 같은 목적지 이름을 다시 보내면 그대로 다시 나간다.
+            handler.removeCallbacks(tick);
+            release();
+            clearedByStop = true;
+        }
         crossroad = null;
         event = 0;
         road = null;
@@ -261,34 +384,150 @@ final class AaTurns {
     /** The connection ended: clear what we showed, if a route was on. */
     void end() {
         handler.removeCallbacks(tick);
+        PhoneBar.send(context, barOut, PhoneBar.NONE, now());
         if (navLive) status(2);
     }
 
     // ---- the next turn
 
     void sendTurn() {
-        if (!navLive) return;
-        int bar = 32, barErr = 0;
+        if (!navLive || focusNative) return;
+        if (rerouting) {
+            // 재탐색 중에는 폰 이벤트마다 표시 10만 다시 보낸다(AA에는 카플레이 refresh 같은 주기 재전송이 없음, 리뷰 7)
+            cluster.tbtInfo(DISPLAY_RESEARCH, 0, 0f, 0f, CLEAR_DIST_ERR, 0, CLEAR_UNIT, 0, 0);
+            PhoneBar.send(context, barOut, 0, now());
+            sent();
+            return;
+        }
+        // 멀리 있음 값(M-3): 막대 무효, 옆길 0, 방향 0. 거리가 아직 없을 때(첫 출발)는 2.3.0까지와 같은 값
+        int bar = BAR_FAR, barErr = BAR_FAR_ERR;
         if (distance < 0f) {
             bar = 254;
             barErr = -2;
             if (displayType < 64) displayType = 2;
         }
-        logTurn();
-        cluster.tbtInfo(displayType, 65535, direction, distance, 0, 0, unit, bar, barErr);
+        int[] near = distance < 0f ? null : near();
+        logTurn(near);
+        // 도로 이름은 곧 회전일 때만(순정 sendTurnNameData: 멀리 있으면 빈 이름)
+        sendCrossroad(near != null ? road : "");
+        if (near != null) cluster.tbtInfo(near[0], near[1], near[2] * 7.5f, distance, 0, 0, unit, near[3], 0);
+        else cluster.tbtInfo(displayType, 0, 0f, distance, 0, 0, unit, bar, barErr);
+        // 순정처럼 단속 정보 프레임의 막대 칸에도 같은 값(멀리 있으면 0)
+        PhoneBar.send(context, barOut, near != null ? near[3] : 0, now());
+        sent();
         sendHudList();
         sendHudDistance();
     }
 
     /** the turn's values (numbers only: no road names) when they change, up to TURN_LOGS_MAX lines */
-    void logTurn() {
+    void logTurn(int[] near) {
         if (log == null) return;
-        String k = event + " " + turnSide + " " + turnAngle + " " + displayType;
+        String k = event + " " + turnSide + " " + turnAngle + " " + displayType + " " + (near == null ? "far" : near[0] + " " + near[4]);
         if (k.equals(turnKey) || turnLogs >= TURN_LOGS_MAX) return;
         turnKey = k;
         turnLogs++;
-        log.line("AA: turn ev " + event + " side " + turnSide + " angle " + turnAngle + " -> icon " + displayType);
+        log.line("AA: turn ev " + event + " side " + turnSide + " angle " + turnAngle + " -> icon " + displayType
+                + (near == null ? " far" : " near display " + near[0] + " bar " + near[3] + " d " + near[4]));
     }
+
+    /** 재탐색 표시(순정 10): 방향·옆길·거리 무효, 막대 0. 도로 이름을 비우고 2C·HUD 목록을 지운다(순정 강제 지우기) */
+    void sendRerouting() {
+        if (focusNative) return;
+        cluster.tbtInfo(DISPLAY_RESEARCH, 0, 0f, 0f, CLEAR_DIST_ERR, 0, CLEAR_UNIT, 0, 0);
+        PhoneBar.send(context, barOut, 0, now());
+        cluster.crossroadName("");
+        crossroad = "";
+        crossroadAt = now();
+        cluster.tbtSubInfo2C(HUD_CLEAR_UNIT, HUD_CLEAR_TENTHS, HUD_NO_POINT, HUD_CLEAR_UNIT, HUD_CLEAR_TENTHS, HUD_NO_POINT,
+                HUD_CLEAR_UNIT, HUD_CLEAR_TENTHS, HUD_NO_POINT);
+        cluster.turnListNew(new byte[] { HUD_LIST, 0 });
+        hudType = -1;
+        hudNext = 0;
+        hudThird = 0;
+        hudFresh = false;
+        hudRoad = null;
+        sent();
+    }
+
+    /**
+     * 곧 회전 화면 값 {표시 번호, 옆길 비트, 방향 칸(7.5도 단위), 막대(10..90), D} 또는 멀리 있음이면 null(M-12).
+     * 조건(소유자 결정 2026-11-09, 차로 조건 없음): 남은 거리(m)를 앎, 곧 회전 화면이 있는 회전, 남은 거리 <= D.
+     */
+    int[] near() {
+        if (remainMeters < 0) return null;
+        // 이 회전의 처음 거리: 차로가 오기 전부터 센다(폰이 이 회전에 처음 준 거리). 거리가 늘면 새 회전으로 본다
+        String key = event + " " + turnSide + " " + turnAngle + " " + road;
+        if (!key.equals(nearKey) || remainMeters > nearFirst) {
+            nearKey = key;
+            nearFirst = remainMeters;
+        }
+        // 소유자 결정 2026-11-09: 차로 조건을 뺐다(카플레이와 같은 규칙). D 안의 회전이면 곧 회전
+        int[] disp = nearDisplay(event, turnSide, displayType, direction);
+        if (disp == null) return null;
+        int d = event == OFF_RAMP ? D_EXPRESSWAY : D_GENERAL;
+        // D는 순정처럼 고정이다(차 로그 2026-11-09: 순정은 210m에서 처음 본 회전도 막대 60으로 시작한다)
+        if (remainMeters > d) return null;
+        int bits = disp[1] < 0 ? 0 : 1 << disp[1];
+        return new int[] { disp[0], bits, disp[2], bar(remainMeters, d), d };
+    }
+
+    /** 막대 = 10 x max(1, floor(남은 x 10 / D)), 90까지(순정 SetCase*, 차 로그 2026-11-09 최대 90) */
+    static int bar(int remain, int d) {
+        int b = (int) ((long) remain * 10L / d);
+        if (b < 1) b = 1;
+        if (b > 9) b = 9;
+        return b * 10;
+    }
+
+    /**
+     * 곧 회전 {표시 번호, 나가는 길 옆길 비트 번호(-1: 옆길 없음), 방향 칸} 또는 곧 회전 화면이 없는 회전이면 null. 순정 SetCase*:
+     * 회전 13(방향: 약간 6/42, 보통 12/36, 급 18/30, 직진 0), 유턴 31(오른쪽 통행 36), 출구 17/18(12/36), Y자 갈림 25,
+     * 회전교차로는 출구 아이콘 그대로(방향은 출구 각도). 방향을 모르는 회전(아이콘 64), 이름 바뀜·출발·목적지·페리는 멀리 있음.
+     */
+    static int[] nearDisplay(int ev, int side, int displayType, int direction) {
+        switch (ev) {
+            case SLIGHT_TURN: case TURN: case SHARP_TURN: {
+                if (side != LEFT && side != RIGHT) return null;
+                int slot = ev == SLIGHT_TURN ? 6 : ev == TURN ? 12 : 18;
+                if (side == LEFT) slot = 48 - slot;
+                return new int[] { NEAR_TURN, slot / 3, slot };
+            }
+            case STRAIGHT: case MERGE:
+                return new int[] { NEAR_TURN, 0, 0 };
+            case ON_RAMP: {
+                int slot = side == RIGHT ? 6 : side == LEFT ? 42 : 0;
+                return new int[] { NEAR_TURN, slot / 3, slot };
+            }
+            case U_TURN:
+                return new int[] { NEAR_UTURN, -1, side == RIGHT ? 12 : 36 };
+            case OFF_RAMP:
+                return side == LEFT ? new int[] { NEAR_EXIT_LEFT, -1, 36 } : new int[] { NEAR_EXIT_RIGHT, -1, 12 };
+            case FORK:
+                if (side != LEFT && side != RIGHT) return null;
+                return new int[] { NEAR_FORK, -1, side == RIGHT ? 6 : 42 };
+            case ROUNDABOUT_ENTER_AND_EXIT: {
+                // 회전교차로: 출구 아이콘 그대로, 방향은 출구 각도(setRoundaboutType의 direction, 시계 방향)
+                if (displayType == 64 || displayType <= 0) return null;
+                int cw = ((direction % 360) + 360) % 360, bit, slot;
+                if (cw >= 348 || cw <= 12) {
+                    bit = 0;
+                    slot = 0;
+                } else if (cw > 168 && cw < 192) {
+                    // 뒤쪽 출구(순정 SetSideStreetBit): 179도 이하 비트 7·칸 21, 그 밖 비트 8·칸 27
+                    bit = cw <= 179 ? 7 : 8;
+                    slot = cw <= 179 ? 21 : 27;
+                } else {
+                    bit = Math.min(15, (int) ((cw - 12) / 22.5) + 1);
+                    slot = 3 * bit;
+                }
+                return new int[] { displayType, bit, slot };
+            }
+            default:
+                return null;
+        }
+    }
+
+
 
     /** Distance to the next turn, in the owner's unit (Settings) where the phone's differs. */
     void setDistance(int meters, int e3, int u) {
@@ -443,35 +682,54 @@ final class AaTurns {
 
     // ---- HUD
 
+    /** HUD 목록 이름의 최대 바이트(UTF-16LE). 순정 내비는 이름 칸을 0x50바이트까지 쓴다(drafts/stock-re 3-3) */
+    static final int HUD_NAME_MAX = 78;
+
+    /**
+     * UTF-16LE로 max 바이트 안에 드는 이름 앞부분. 글자 경계에서 자르고, 서로게이트 쌍(이모지 등)의
+     * 앞 반쪽만 남기지 않는다. 1.7.2(M-15)
+     */
+    static String hudName(String s, int max) {
+        int n = Math.min(s.length(), max / 2);
+        if (n > 0 && n < s.length() && Character.isHighSurrogate(s.charAt(n - 1)) && Character.isLowSurrogate(s.charAt(n))) n--;
+        return s.substring(0, n);
+    }
+
     /** The HUD's turn list: this turn's icon, the next one's (if known) and the road name, when one of them changed. */
     void sendHudList() {
         int type = displayType;
         if (type < 64) return;
-        int next = 0;
+        int next = 0, third = 0;
         if (aheadOk[0]) {
             next = aheadType(aheadEv[0], aheadSide[0]);
+            // 셋째 칸(M-2): 순정은 아이콘을 3칸까지 채운다
+            if (aheadOk[1]) third = aheadType(aheadEv[1], aheadSide[1]);
             hudFresh = true;
         } else if (hudFresh) {
             next = hudNext;
+            third = hudThird;
         }
         String r = road == null ? "" : road;
-        if (hudType == type && hudNext == next && r.equals(hudRoad)) return;
+        if (hudType == type && hudNext == next && hudThird == third && r.equals(hudRoad)) return;
         byte[] name;
         try {
-            name = r.getBytes("UTF-16LE");
+            name = hudName(r, HUD_NAME_MAX).getBytes("UTF-16LE");
         } catch (java.io.UnsupportedEncodingException e) {
             return;
         }
-        int n = Math.min(name.length, 78);
+        int n = name.length;
         byte[] f = new byte[n + 5];
         f[0] = HUD_LIST;
-        f[1] = (byte) (next != 0 ? 2 : 1);
+        f[1] = (byte) (1 + (next != 0 ? 1 : 0) + (third != 0 ? 1 : 0));
         f[2] = (byte) type;
         f[3] = (byte) next;
+        f[4] = (byte) third;
         System.arraycopy(name, 0, f, 5, n);
         cluster.turnListNew(f);
+        sent();
         hudType = type;
         hudNext = next;
+        hudThird = third;
         hudRoad = r;
     }
 
@@ -493,42 +751,56 @@ final class AaTurns {
             if (u == Cluster.UNIT_KM || u == Cluster.UNIT_MI) tenths = Math.max(0, Math.min(9, (int) ((d - whole) * 10f + 0.5f)));
         }
         cluster.tbtSubInfo2C(u, tenths, whole, 0, 0, HUD_NO_POINT, 0, 0, HUD_NO_POINT);
+        sent();
     }
 
     void hudBlank() {
         laneKey = "";
         crossroad = null;
-        cluster.tbtSubInfo2C(0, 0, HUD_NO_POINT, 0, 0, HUD_NO_POINT, 0, 0, HUD_NO_POINT);
+        // 세 칸 모두 순정 지우기 값(단위 15, 소수 15, 정수 65535), 1.7.2(M-14)
+        cluster.tbtSubInfo2C(HUD_CLEAR_UNIT, HUD_CLEAR_TENTHS, HUD_NO_POINT, HUD_CLEAR_UNIT, HUD_CLEAR_TENTHS, HUD_NO_POINT,
+                HUD_CLEAR_UNIT, HUD_CLEAR_TENTHS, HUD_NO_POINT);
         byte[] lanes = new byte[81];
         lanes[0] = LANES;
         cluster.laneInfo(lanes);
         hudType = -1;
         hudNext = 0;
+        hudThird = 0;
         hudFresh = false;
         hudRoad = null;
-        cluster.turnListNew(new byte[] { HUD_LIST });
-        cluster.turnListNew(new byte[] { HUD_LIST });
+        laneCount = 0;
+        // 빈 목록은 순정과 같은 {F2, 00}(M-2)
+        cluster.turnListNew(new byte[] { HUD_LIST, 0 });
+        cluster.turnListNew(new byte[] { HUD_LIST, 0 });
     }
 
     /** Clears the turn, the remaining trip, the destination and the HUD. */
     void release() {
+        PhoneBar.send(context, barOut, PhoneBar.NONE, now());
         destName = "";
         sendDestName();
         destName = null;
-        cluster.tbtInfo(0, 0, 0f, 0f, -1, 0, 0, 0, -1);
-        cluster.tbtSubInfo(0f, -1, 0, 0, 0, 0, 0, 0f, -1, 0);
+        // 순정 무안내 값(M-14): 표시 8, 거리 무효 -3, 단위 15, 막대 무효 -1(2.3.0까지는 표시 0, -1, 단위 0)
+        cluster.tbtInfo(CLEAR_ICON, 0, 0f, 0f, CLEAR_DIST_ERR, 0, CLEAR_UNIT, 0, BAR_FAR_ERR);
+        // 남은 거리·시간도 순정 무효 값으로(리뷰 6, 카플레이 clearTurn과 같음)
+        cluster.tbtSubInfo(0f, CLEAR_DIST_ERR, CLEAR_UNIT, 0, 0, CLEAR_TIME, CLEAR_TIME, 0f, -1, CLEAR_EST_POINT);
+        // 도로(교차로) 이름도 지운다(2차 리뷰 4, 카플레이 clearTurn과 같음). 순정은 이 칸을 거의 보내지 않는다
+        cluster.crossroadName("");
         hudBlank();
     }
 
     void sendDestName() {
-        if (destName != null) cluster.destinationName(0, destName);
+        if (destName == null) return;
+        // 포커스가 순정인 동안 이름은 기억만 한다(빈 이름 = 지우기는 release가 보낸다). 폰으로 돌아오면 focusPhone이 보낸다
+        if (focusNative && destName.length() > 0) return;
+        cluster.destinationName(0, destName);
+        if (destName.length() > 0) sent();
     }
 
     // ---- lanes: "nn" lane count, then per lane 8 hex digits (type, then 3 arrow bytes)
 
     void sendLanes(String s) {
         if (s == null) s = "";
-        if (s.equals(laneKey)) return;
         int n = 0;
         if (s.length() >= 2) {
             n = hexByte(s, 0);
@@ -548,7 +820,12 @@ final class AaTurns {
                 f[k * 3 + 19 + j] = (byte) b;
             }
         }
+        // 차로 수는 포커스와 상관없이 기억한다: 1 이상이면 이 회전에 차로 안내가 있다(곧 회전 화면 판단, M-12)
+        laneCount = n;
+        // 재탐색 중에는 차로 프레임을 계기판에 보내지 않는다(표시 10 화면, 리뷰 7)
+        if (focusNative || rerouting || s.equals(laneKey)) return;
         cluster.laneInfo(f);
+        sent();
         laneKey = s;
     }
 
@@ -578,6 +855,7 @@ final class AaTurns {
     }
 
     void sendAhead(int n) {
+        if (focusNative) return;
         int count = 0;
         for (int k = 0; k < n; k++) if (aheadOk[k]) count++;
         if (count == 0) return;
@@ -614,8 +892,10 @@ final class AaTurns {
             list[i++] = t;
         }
         cluster.turnList(list);
+        sent();
         if (aheadOk[0]) {
             hudNext = aheadType(aheadEv[0], aheadSide[0]);
+            hudThird = aheadOk[1] ? aheadType(aheadEv[1], aheadSide[1]) : 0;
             hudFresh = true;
         }
         for (int k = 0; k < 3; k++) aheadOk[k] = false;
@@ -625,7 +905,7 @@ final class AaTurns {
 
     /** Sends the remaining trip when it changed or the owner changed units; then checks again every 250 ms. */
     void sendRemain() {
-        if (!navLive || tripMeters < 0) return;
+        if (!navLive || focusNative || tripMeters < 0) return;
         if (tripGen == sentGen) {
             int usm = Car.distanceUnit(context);
             if (usm == -1 || usm == lastUsm) return;
@@ -673,6 +953,7 @@ final class AaTurns {
             timeFormat = context == null || DateFormat.is24HourFormat(context) ? 2 : 1;
         }
         cluster.tbtSubInfo(whole + tenths / 10f, 0, cu, hour, minute, timeType, timeFormat, 0f, -1, estPoint);
+        sent();
         scheduleTick();
     }
 

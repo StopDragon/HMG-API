@@ -4,6 +4,13 @@ package hmgapi.mods.wireless;
 //     the cluster and HUD show the phone's lanes only (1.7.1 map 2-H); back as soon as it stops
 //   - with Korea Projection's debug log on, what the car navigation sends (icon, lane frame, 2C)
 //     is logged as numbers (StockLog); Android Auto's turn log lines (AaTurns) go to the mod's log
+// Korea Projection 1.7.2 수정(2026-11-08, 모드 2.3.1 판 그대로, 계획 M-13): 디버그일 때 순정 관찰 기록을 넓혔다.
+//   교차로 이름은 객체에서 꺼내 글자 수만 남긴다. updateCluDataNew_14·updateRoadEventInfo는 지도(훅 지점)에
+//   없는 메서드라 디버그일 때만 Hooks로 직접 관찰만 건다(막거나 바꾸지 않음, 없으면 한 줄 남기고 넘어감).
+// 1.7.2 리뷰 반영: 순정 계기판 호출(NAVI_TBT)의 마지막 값을 늘 기억했다가, 폰 안내가 끝나면 순정 호출 훅 안에서
+//   1.5초·5초 뒤에 다시 보낸다(StockReplay, 순정 호출이 없으면 백업 타이머 한 번). 우리 지우기가 순정 값보다 늦게
+//   도착하거나 순정이 값을 바꾸지 않아도 계기판이 빈 채로 남지 않게 한다.
+// 1.7.2 차-5 뒤 진단: 디버그 로그가 켜졌으면 DiPO 쪽(Dipo.debug → CpTurns)에 알려 곧 회전 판단 진단 줄을 남기게 한다.
 
 import android.content.ComponentName;
 import android.content.Context;
@@ -13,6 +20,7 @@ import android.content.IntentFilter;
 import android.hardware.usb.UsbDevice;
 
 import hmgapi.hook.Car;
+import hmgapi.hook.Hooks;
 import hmgapi.hook.LoadedApp;
 import hmgapi.hook.MethodHook;
 import hmgapi.hook.ModContext;
@@ -79,7 +87,10 @@ public final class Wireless extends ModEntry {
         if (IAP2.equals(app.packageName)) iap2(mod, app);
         if (GPM.equals(app.packageName) && mod.settingBoolean("usb_drives", true)) usbDrives(mod, app);
         if (GPM.equals(app.packageName) && mod.settingBoolean("tbt", true)) gpmTurnByTurn(mod, app);
-        if (BTSETTINGS.equals(app.packageName) && mod.settingBoolean("menu", true)) phoneProjectionMenu(mod, app);
+        // Korea Projection (korea-build): the menu fix is for US/Canada only, and its hook point isn't on every
+        // Korean firmware (NQ5 260604: no btsettings.projection_helper.*). A declared point a car lacks turns off
+        // all of this mod's hooks there (HookPlan), so the Korean build doesn't declare it and never hooks it.
+        if (BTSETTINGS.equals(app.packageName) && mod.settingBoolean("menu", true) && MENU_DECLARED) phoneProjectionMenu(mod, app);
         // 한국 차 빌드: 패키지가 띄운 AP를 무선 안드로이드 오토가 쓰게 한다(AaWifi, 켜기 속성이 있을 때만 동작)
         if ((GPM.equals(app.packageName) || AaWifi.PHONEPROJ.equals(app.packageName)) && mod.settingBoolean("aa_ap", true)) AaWifi.hook(mod, app);
         if (DIPO.equals(app.packageName) && (mod.settingBoolean("tbt", true) || mod.settingBoolean("bridge", true) || mod.settingBoolean("audio", true))) dipo(mod, app);
@@ -92,7 +103,14 @@ public final class Wireless extends ModEntry {
      */
     private void dipo(ModContext mod, LoadedApp app) {
         try {
-            mod.appPart(app, "hmgapi.mods.wireless.dipo.Dipo").getMethod("start", ModContext.class, LoadedApp.class).invoke(null, mod, app);
+            Class<?> part = mod.appPart(app, "hmgapi.mods.wireless.dipo.Dipo");
+            // 1.7.2 진단: 디버그 로그가 켜졌으면 DiPO 쪽(CpTurns)도 곧 회전 판단 줄을 남긴다(숫자만)
+            try {
+                part.getField("debug").setBoolean(null, debug);
+            } catch (Throwable t) {
+                mod.log("DiPO part: no debug flag (" + t.getClass().getSimpleName() + ")");
+            }
+            part.getMethod("start", ModContext.class, LoadedApp.class).invoke(null, mod, app);
         } catch (Throwable t) {
             mod.error("DiPO part", t instanceof java.lang.reflect.InvocationTargetException ? t.getCause() : t);
         }
@@ -111,19 +129,130 @@ public final class Wireless extends ModEntry {
     private void navigation(final ModContext mod, final LoadedApp app) {
         if (!mod.settingBoolean("tbt", true)) return;
         final StockLog seen = new StockLog(debug);
+        final StockReplay replay = new StockReplay();
+        // 1.7.2 시험판 3: 폰 막대를 순정 단속 정보 프레임의 막대 칸에 넣는다(없는 차면 null, 나머지는 그대로)
+        final TrapBar trapBar = TrapBar.install(mod, app);
         for (final String m : NAVI_TBT) {
             mod.hook(null, "framework.navigation_cluster." + m, new MethodHook() {
                 @Override
                 protected void beforeHookedMethod(Param p) {
+                    if (REPLAYING.get() != null) return;   // 우리가 다시 보내는 순정 값: 그대로 통과
                     boolean phone = Car.phoneGuiding(app.context);
-                    String line = seen.line(m, p.args, phone);
+                    String line = seen.line(m, debug ? stockArgs(m, p.args) : p.args, phone);
                     if (line != null) mod.log(line);
+                    // 막든 통과하든 최신 순정 값을 기억하고, 폰 안내가 끝났으면 이 호출 자리에서 다시 보낸다(2차 리뷰 1)
+                    StockReplay.Out o = replay.call(m, p.thisObject, p.method, p.args, phone, android.os.SystemClock.elapsedRealtime());
                     if (phone) p.setResult(null);
+                    resend(mod, o);
+                    // 막대 칸 확인이 실패해도 위의 막기·다시 보내기는 그대로다(리뷰 9)
+                    if (trapBar != null) {
+                        try {
+                            trapBar.check(phone);
+                        } catch (Throwable t) {
+                            // 남기지 않는다(TrapBar가 실패를 한 번 남긴다)
+                        }
+                    }
+                    if (o.backupGen != 0) scheduleBackup(mod, app, replay, o.backupGen);
                 }
             });
         }
+        if (debug) observeOnly(mod, seen, StockLog.CLU_DATA_14, "updateCluDataNew_14", int.class, int.class, int.class, int.class, int.class);
+        if (debug) observeOnly(mod, seen, StockLog.ROAD_EVENT, "updateRoadEventInfo", byte[].class);
         mod.log("navigation: turn-by-turn and lanes yield to the phone in " + app.processName
                 + (debug ? " (debug: stock values logged)" : ""));
+    }
+
+    /** 로그용 기기 주소 가리기(모두 가림, Mac.mask) */
+    static String mask(String a) {
+        return Mac.mask(a);
+    }
+
+    /** 다시 보내는 중인 스레드 표시: 이 호출은 기록·차단 없이 통과시킨다 */
+    static final ThreadLocal<Boolean> REPLAYING = new ThreadLocal<Boolean>();
+    private static android.os.Handler replayHandler;
+
+    static synchronized android.os.Handler replayHandler() {
+        if (replayHandler == null) {
+            android.os.HandlerThread t = new android.os.HandlerThread("hmgapi-navi-replay");
+            t.start();
+            replayHandler = new android.os.Handler(t.getLooper());
+        }
+        return replayHandler;
+    }
+
+    /**
+     * StockReplay가 고른 순정 값을 다시 보낸다(1.7.2 리뷰 2·2차 리뷰 1). 보통 순정 호출 훅 안(순정 스레드)에서
+     * 불린다. 같은 hooked 메서드를 부르되 REPLAYING 표시로 기억·막기·기록을 건너뛴다. 호출마다 예외를 잡고,
+     * 로그에는 개수만 남긴다.
+     */
+    static void resend(ModContext mod, StockReplay.Out o) {
+        if (o.resend.isEmpty()) return;
+        int ok = 0, failed = 0;
+        REPLAYING.set(Boolean.TRUE);
+        try {
+            for (Object[] c : o.resend) {
+                try {
+                    ((java.lang.reflect.Method) c[1]).invoke(c[0], (Object[]) c[2]);
+                    ok++;
+                } catch (Throwable t) {
+                    failed++;
+                }
+            }
+        } finally {
+            REPLAYING.remove();
+        }
+        mod.log("navigation: stock cluster values resent after phone guidance, round " + o.round + ": " + ok + " calls"
+                + (failed > 0 ? ", " + failed + " failed" : ""));
+    }
+
+    /**
+     * 순정 호출이 오지 않을 때를 위한 백업 한 번(StockReplay.BACKUP_MS 뒤). 세대가 같고 아직 끝나지 않았으며 폰 안내가
+     * 다시 시작되지 않았을 때만 보낸다. 한 번의 끝에 하나만 걸리고 반복하지 않는다.
+     */
+    private static void scheduleBackup(final ModContext mod, final LoadedApp app, final StockReplay replay, final int gen) {
+        replayHandler().postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    if (Car.phoneGuiding(app.context)) return;
+                    resend(mod, replay.backup(gen));
+                } catch (Throwable t) {
+                    mod.error("navigation: stock cluster resend", t);
+                }
+            }
+        }, StockReplay.BACKUP_MS);
+    }
+
+    /** 관찰 기록용 인자: 교차로 이름 객체는 이름 문자열로 바꿔 넘긴다(StockLog는 글자 수만 남긴다) */
+    static Object[] stockArgs(String point, Object[] args) {
+        if (!"update_tp_crossroad_name".equals(point) || args == null || args.length < 1 || args[0] == null) return args;
+        try {
+            Object n = Points.field(null, "framework.crossroad_name.name").get(args[0]);
+            return new Object[] { n instanceof String ? n : null };
+        } catch (Throwable t) {
+            return new Object[0];   // 꺼내지 못하면 남기지 않는다
+        }
+    }
+
+    /**
+     * 순정 내비가 부르는 NavigationCluster 메서드 하나를 관찰만 한다(1.7.2, M-13, 디버그 때만). 지도에 없는 메서드라
+     * HookPlan을 거치지 않고 이 프로세스에서만 건다. 없는 차에서는 한 줄 남기고 넘어간다(다른 훅에 영향 없음).
+     */
+    private static void observeOnly(final ModContext mod, final StockLog seen, final String label, String method, Object... types) {
+        try {
+            Object[] a = new Object[types.length + 1];
+            System.arraycopy(types, 0, a, 0, types.length);
+            a[types.length] = new MethodHook() {
+                @Override
+                protected void beforeHookedMethod(Param p) {
+                    String line = seen.line(label, p.args, false);
+                    if (line != null) mod.log(line);
+                }
+            };
+            Hooks.findAndHookMethod(Points.cls(null, "framework.navigation_cluster"), method, a);
+        } catch (Throwable t) {
+            mod.log("navigation: no NavigationCluster." + method + " to observe (" + t.getClass().getSimpleName() + ")");
+        }
     }
 
     /**
@@ -198,7 +327,7 @@ public final class Wireless extends ModEntry {
         btComponent = comp;
         Points.call(cl, "iap2.service.set_device_serial", svc, serial);
         Points.call(cl, "iap2.service.receive_connect", svc, comp);
-        mod.log("bridge: Bluetooth iAP2 session requested, component " + comp + " serial " + serial);
+        mod.log("bridge: Bluetooth iAP2 session requested, component " + comp + " serial " + mask(serial));
     }
 
     static void stopBt(ModContext mod, ClassLoader cl, Object svc, String why) {
@@ -297,7 +426,9 @@ public final class Wireless extends ModEntry {
         mod.hook(cl, "gpm.receiver.send_navigation_focus", new OnTurns() {
             @Override
             void run(AaTurns t, Object[] a) {
+                // 순정으로 가면 지우고 폰 이벤트를 멈춘다. 폰으로 돌아오면 다시 보낸다(1.7.2 M-14, 2차 리뷰 3)
                 if (a[0].equals(Points.get(cl, "gpm.receiver.focus_native", null))) t.stop();
+                else t.focusPhone();
             }
 
             @Override
@@ -349,6 +480,9 @@ public final class Wireless extends ModEntry {
         }
         return true;
     }
+
+    /** the Korean build leaves btsettings.projection_helper.open_wireless_page out of mod.json */
+    static final boolean MENU_DECLARED = false;
 
     private void phoneProjectionMenu(final ModContext mod, LoadedApp app) {
         final ClassLoader cl = app.classLoader;
