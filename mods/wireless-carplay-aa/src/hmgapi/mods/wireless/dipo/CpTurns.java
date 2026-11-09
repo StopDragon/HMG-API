@@ -89,6 +89,16 @@ final class CpTurns {
     /** component id -> maneuver index -> maneuver (DiPO e/u.Am) */
     final LinkedHashMap<Integer, LinkedHashMap<Integer, Maneuver>> maneuvers = new LinkedHashMap<Integer, LinkedHashMap<Integer, Maneuver>>();
     String source;
+    /**
+     * 최근에 본 출처 이름과 마지막으로 본 시각(1.7.2 베타 2, #132). iOS 26.1의 애플 지도는 `Apple Maps`와 `Apple 지도`를
+     * 번갈아 보낸다. SOURCE_SAME_MS 안에 본 이름으로 돌아오면 같은 앱으로 보고 지우지 않는다(앱 이름 표는 쓰지 않는다).
+     */
+    final LinkedHashMap<String, Long> recentSources = new LinkedHashMap<String, Long>();
+    static final long SOURCE_SAME_MS = 60000L;
+    /** 같은 앱으로 보고 회전을 다시 받기로 한 시각(0이면 아님)과 기다리는 한도: 넘으면 계기판·HUD를 지운다 */
+    long sourceWaitAt;
+    static final long SOURCE_WAIT_MS = 10000L;
+    static final int SOURCE_KEEP = 4;
     /** last HUD list sent (type, next, road), so an unchanged one isn't resent */
     int hudType, hudNext, hudThird;
     String hudRoad;
@@ -146,6 +156,8 @@ final class CpTurns {
     boolean shown;
     /** HUD 목록·차로·2C를 보낸 뒤 아직 지우지 않았는지(2차 리뷰 2, hudBlank) */
     boolean hudShown;
+    /** 거리를 몰라 HUD 첫 칸을 비워 보냈다(같은 값을 되풀이하지 않게, 거리를 알면 풀림) */
+    boolean hudDistBlank;
     /**
      * 차로 안내(LaneGuidance) 번호 -> 차로 수(M-4). 회전이 링크한 차로 안내(item 12)에 차로가 있어야 곧 회전 화면을 쓴다.
      * 순정은 교차로 확대도·표지판 안내가 있을 때만 곧 회전 화면을 쓰고, 폰은 그 정보를 주지 않으므로 가장 가까운 차로 안내로 대신한다.
@@ -540,6 +552,7 @@ final class CpTurns {
     /** the iAP2 session ended (DiPO e/u.disconnected) */
     void disconnected() {
         reset();
+        recentSources.clear();
         clearTurn();
         hudBlank();
         source = null;
@@ -548,6 +561,7 @@ final class CpTurns {
     /** route guidance stopped (DiPO e/u.nS: the car's navigation took turn-by-turn back, or state 0) */
     void stop() {
         activeId = null;
+        sourceWaitAt = 0L;
         searching = 0;
         nearKey = null;
         // 새 경로는 차로 안내 번호를 처음부터 다시 쓴다: 옛 경로의 차로 수를 남기지 않는다(리뷰 3)
@@ -565,6 +579,8 @@ final class CpTurns {
         barOut.send(context, PhoneBarOut.NONE, now());
         if (!shown) return;
         shown = false;
+        // 진단(1.7.2 베타 2, #61·#123 "안내를 끝내도 잠시 남음"): 지운 때와 폰의 마지막 갱신 뒤 지난 시간(숫자만)
+        Dipo.log("CarPlay: turn-by-turn cleared, " + (now() - phoneAt) / 1000L + " s after the phone's last update");
         cluster.tbtInfo(CLEAR_ICON, 0, 0f, 0f, CLEAR_DIST_ERR, 0, CLEAR_UNIT, 0, BAR_FAR_ERR);
         // 남은 거리·도착 시각도 순정 무효 값으로 지운다(리뷰 6, AA release와 같은 값)
         cluster.tbtSubInfo(0f, CLEAR_DIST_ERR, CLEAR_UNIT, 0, 0, CLEAR_TIME, CLEAR_TIME, 0f, -1, CLEAR_EST_POINT);
@@ -608,6 +624,7 @@ final class CpTurns {
     /** forget every component's state and maneuvers (DiPO e/u.nT) */
     void reset() {
         activeId = null;
+        sourceWaitAt = 0L;
         laneCounts.clear();
         nearKey = null;
         searching = 0;
@@ -631,7 +648,28 @@ final class CpTurns {
             if (s == null || s.length() == 0) continue;
             String was = source;
             source = s;
+            long t = now();
+            Long seen = recentSources.remove(s);
+            recentSources.put(s, t);
+            while (recentSources.size() > SOURCE_KEEP) recentSources.remove(recentSources.keySet().iterator().next());
             if (was == null || was.equals(s)) return;
+            if (seen != null && t - seen < SOURCE_SAME_MS) {
+                // 방금 본 이름으로 돌아왔다: 계기판·HUD·막대는 지우지 않는다(같은 앱의 이름 바뀜이면 깜빡이지 않게).
+                // 다만 실제로 다른 앱에서 돌아온 것일 수도 있어(리뷰 1) 받아 둔 회전·상태는 비우고 폰에게 다시 보내 달라고 한다.
+                // 화면은 폰이 다시 보낼 때까지 마지막 그림을 유지한다.
+                Dipo.log("CarPlay: route guidance source name back to one seen " + (t - seen) / 1000L + " s ago, display kept, data asked again");
+                // 안내 상태(updates)는 남긴다: 비우면 상태 0이 되어 바로 "안내 끝"으로 지워진다. 회전·차로·곧 회전 기준만 비운다
+                for (LinkedHashMap<Integer, Maneuver> m : maneuvers.values()) {
+                    if (m != null) m.clear();
+                }
+                laneCounts.clear();
+                nearKey = null;
+                // 옛 HUD 목록은 다시 보내지 않는다. 폰이 SOURCE_WAIT_MS 안에 회전을 다시 주지 않으면 turn()이 지운다(2차 리뷰 1)
+                lastHud = null;
+                sourceWaitAt = t;
+                if (restart != null) new Thread(restart, "hmgapi-cp-rg-restart").start();
+                return;
+            }
             Dipo.log("CarPlay: route guidance source changed from " + was + " to " + s + ", clearing turn-by-turn");
             reset();
             // 앞 앱의 막대를 남기지 않는다(리뷰 7)
@@ -660,10 +698,13 @@ final class CpTurns {
         }
         int[] list = u.list == null ? null : u.list.clone();
         float dist = 0f;
+        // 거리를 모르면(빈 문자열·숫자 아님) 0 대신 거리 무효로 보낸다(1.7.2 베타 2, #123: 경로 시작 때 0.0이 보임)
+        boolean distKnown = false;
         if (u.nextStr != null && !u.nextStr.equals("")) {
             try {
                 dist = Float.parseFloat(u.nextStr);
-                if (Float.isNaN(dist) || Float.isInfinite(dist)) dist = 0f;
+                distKnown = !(Float.isNaN(dist) || Float.isInfinite(dist) || dist < 0f);
+                if (!distKnown) dist = 0f;
             } catch (NumberFormatException e) {
                 dist = 0f;
             }
@@ -677,9 +718,18 @@ final class CpTurns {
             shown = true;
         }
         LinkedHashMap<Integer, Maneuver> m = maneuvers.get(id);
-        if (m == null || list == null) return;
-        Maneuver x = m.get(list[0]);
-        if (x == null) return;
+        Maneuver x = m == null || list == null ? null : m.get(list[0]);
+        if (x == null) {
+            // 이름이 돌아와 회전을 다시 받는 중인데 한도 안에 오지 않으면 옛 그림을 지운다
+            if (sourceWaitAt != 0L && t - sourceWaitAt >= SOURCE_WAIT_MS) {
+                Dipo.log("CarPlay: no turns resent " + (t - sourceWaitAt) / 1000L + " s after the source name came back, clearing");
+                sourceWaitAt = 0L;
+                clearTurn();
+                hudBlank();
+            }
+            return;
+        }
+        sourceWaitAt = 0L;
         int unit;
         switch (u.nextUnits) {
             case 0: unit = Cluster.UNIT_KM; break;
@@ -689,6 +739,9 @@ final class CpTurns {
             default: unit = Cluster.UNIT_M; break;
         }
         int icon = icon(x.type, x.side, x.junction, x.exit, u.state);
+        // 출발(종류 11 StartRoute, 18 StartRouteWithUTurn)의 0은 "아직 거리 없음"이다: 순정 경로 계산 화면처럼 거리 무효로 둔다
+        if ((x.type == 11 || x.type == 18) && dist == 0f) distKnown = false;
+        int distErr = distKnown ? 0 : CLEAR_DIST_ERR;
         // StartRoute has no direction: clear the previous app's HUD arrow (upstream 83eb4ef;
         // once, so refresh() doesn't clear it again every second)
         if (x.type == 11 && icon == 1 && hudType != -1) hudBlank();
@@ -718,8 +771,8 @@ final class CpTurns {
             crossroad = road;
             crossroadAt = t;
         }
-        if (near != null) cluster.tbtInfo(near[0], near[1], near[2] * 7.5f, dist, 0, 0, unit, near[3], 0);
-        else cluster.tbtInfo(icon, 0, 0f, dist, 0, 0, unit, BAR_FAR, BAR_FAR_ERR);
+        if (near != null) cluster.tbtInfo(near[0], near[1], near[2] * 7.5f, dist, distErr, 0, unit, near[3], 0);
+        else cluster.tbtInfo(icon, 0, 0f, dist, distErr, 0, unit, BAR_FAR, BAR_FAR_ERR);
         // 순정처럼 단속 정보 프레임의 막대 칸에도 같은 값(멀리 있으면 0)
         barOut.send(context, near != null ? near[3] : 0, t);
         if (debug) {
@@ -732,7 +785,15 @@ final class CpTurns {
         }
         shown = true;
         sendHud(icon, id, u);
-        sendHudDist(dist, unit, id, u);
+        // HUD 거리도 모르면 0 대신 첫 칸을 비운다(앞 회전의 거리가 남지 않게, 한 번만, 리뷰 2)
+        if (distKnown) {
+            hudDistBlank = false;
+            sendHudDist(dist, unit, id, u);
+        } else if (!hudDistBlank) {
+            hudDistBlank = true;
+            cluster.tbtSubInfo2C(HUD_CLEAR_UNIT, HUD_CLEAR_TENTHS, HUD_NO_POINT, HUD_CLEAR_UNIT, HUD_CLEAR_TENTHS, HUD_NO_POINT,
+                    HUD_CLEAR_UNIT, HUD_CLEAR_TENTHS, HUD_NO_POINT);
+        }
         sendTrip(u);
         sendAhead(id, u);
     }

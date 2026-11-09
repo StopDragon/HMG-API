@@ -1,5 +1,7 @@
 package hmgapi.mods.wireless.dipo;
 
+import java.util.LinkedHashMap;
+
 import com.tcc.iap2.Iap2NotiMsg;
 
 import java.util.Calendar;
@@ -838,6 +840,7 @@ public final class CpTurnsTest {
         diag172();
         m15();
         phoneBar();
+        beta2();
         System.exit(fail);
     }
 
@@ -875,6 +878,84 @@ public final class CpTurnsTest {
         int n = ctx.sent.size();
         t.disconnected();
         check("trial 3: then the session ends: no second NONE", ctx.sent.size() == n);
+    }
+
+
+    /** 1.7.2 베타 2: 애플 지도 이름 번갈아(#132), 경로 시작 거리 0.0(#123) */
+    static void beta2() {
+        Car.unit = Car.DISTANCE_KM;
+        c = new Cluster();
+        CpTurns t = new CpTurns(new android.content.Context(), c, null);
+        t.clock = 9700000L;
+        t.maneuver(maneuver(0, 2, 0, 0, 90, "Road S", 300));
+        t.routeGuidance(msg(0, U16, i(1), 1, ENUM, i(1), 10, U32, i(500), 11, STR, s("500"), 12, ENUM, i(2), 13, U16, i(0), 19, STR, s("Apple 지도")));
+        c.calls.clear();
+        t.clock += 10000L;
+        t.routeGuidance(msg(0, U16, i(1), 19, STR, s("Apple Maps")));
+        check("beta 2: a new source name (never seen): cleared once as before", c.calls.contains(CLEAR_TBT));
+        t.maneuver(maneuver(0, 2, 0, 0, 90, "Road S", 300));
+        t.routeGuidance(msg(0, U16, i(1), 1, ENUM, i(1), 10, U32, i(480), 11, STR, s("480"), 12, ENUM, i(2), 13, U16, i(0)));
+        c.calls.clear();
+        t.clock += 20000L;
+        t.routeGuidance(msg(0, U16, i(1), 19, STR, s("Apple 지도")));
+        check("beta 2 (#132): back to a name seen 30 s ago (Apple Maps / Apple 지도): not cleared", !c.calls.contains(CLEAR_TBT) && !c.calls.contains(CLEAR_DEST));
+        t.clock += 15000L;
+        t.routeGuidance(msg(0, U16, i(1), 19, STR, s("Apple Maps")));
+        check("beta 2 (#132): flipping again within a minute: still not cleared", !c.calls.contains(CLEAR_TBT));
+        boolean noted = false;
+        for (String x : Dipo.logs) if (x.contains("display kept, data asked again")) noted = true;
+        check("beta 2: the kept name change is logged (no app names in that line)", noted);
+        LinkedHashMap<Integer, ?> mm = t.maneuvers.get(1);
+        check("beta 2 (review 1): a name seen again: stored turns emptied so the phone's resend rebuilds them (another app may have been in between)",
+                mm == null || mm.isEmpty());
+        c.calls.clear();
+        t.clock += 3000L;
+        t.refresh();
+        check("beta 2 (2nd review 1): waiting for the resend: the old HUD list not resent, nothing cleared yet",
+                !c.calls.contains(CLEAR_TBT) && last("hud ") == null);
+        t.clock += 8000L;
+        t.refresh();
+        check("beta 2 (2nd review 1): no turns resent within 10 s: the old picture cleared", c.calls.contains(CLEAR_TBT));
+        t.clock += 5000L;
+        t.routeGuidance(msg(0, U16, i(1), 19, STR, s("Waze")));
+        check("beta 2: a different app (never seen): cleared", c.calls.contains(CLEAR_TBT));
+        t.maneuver(maneuver(0, 2, 0, 0, 90, "Road S", 300));
+        t.routeGuidance(msg(0, U16, i(1), 1, ENUM, i(1), 10, U32, i(450), 11, STR, s("450"), 12, ENUM, i(2), 13, U16, i(0)));
+        c.calls.clear();
+        t.clock += 120000L;
+        t.routeGuidance(msg(0, U16, i(1), 19, STR, s("Apple Maps")));
+        check("beta 2: back to a name last seen over a minute ago: cleared as a real app change", c.calls.contains(CLEAR_TBT));
+
+        // 경로 시작: 출발(종류 11)에 표시 거리 "0" -> 거리 무효(-3), HUD 거리는 보내지 않음
+        c = new Cluster();
+        CpTurns d = new CpTurns(new android.content.Context(), c, null);
+        d.clock = 9900000L;
+        d.maneuver(maneuver(0, 11, 0, 0, 0, "Start", 0));
+        d.routeGuidance(msg(0, U16, i(1), 1, ENUM, i(1), 11, STR, s("0"), 12, ENUM, i(2), 13, U16, i(0)));
+        String st = last("tbt ");
+        check("beta 2 (#123): route start (StartRoute, shown 0): distance invalid (-3), not 0.0", st != null && st.startsWith("tbt 1 0 0.0 0.0 -3 "));
+        boolean hud0 = false;
+        for (String x : c.calls) if (x.startsWith("2c ") && !x.startsWith("2c 15 15 65535")) hud0 = true;
+        check("beta 2 (#123): no HUD distance 0 at the route start", !hud0);
+        c.calls.clear();
+        d.maneuver(maneuver(0, 2, 0, 0, 90, "Road T", 300));
+        d.routeGuidance(msg(0, U16, i(1), 1, ENUM, i(1), 11, STR, s(""), 12, ENUM, i(2), 13, U16, i(0)));
+        st = last("tbt ");
+        check("beta 2 (#123): a turn with no shown distance yet: distance invalid", st != null && st.contains(" 0.0 -3 "));
+        d.routeGuidance(msg(0, U16, i(1), 1, ENUM, i(1), 10, U32, i(600), 11, STR, s("600"), 12, ENUM, i(2), 13, U16, i(0)));
+        st = last("tbt ");
+        check("beta 2: once the phone gives the distance: sent as usual (error 0)", st != null && st.contains(" 600.0 0 "));
+        c.calls.clear();
+        d.maneuver(maneuver(1, 1, 0, 0, -90, "Road U", 300));
+        d.routeGuidance(msg(0, U16, i(1), 1, ENUM, i(1), 11, STR, s(""), 12, ENUM, i(2), 13, U16, i(1)));
+        d.routeGuidance(msg(0, U16, i(1), 1, ENUM, i(1), 11, STR, s(""), 12, ENUM, i(2), 13, U16, i(1)));
+        int blanks = 0;
+        for (String x : c.calls) if (x.equals(CLEAR_2C)) blanks++;
+        check("beta 2 (review 2): distance unknown mid-route: the HUD's first point emptied once (not the last turn's distance)", blanks == 1);
+        d.maneuver(maneuver(0, 18, 0, 0, 0, "Start", 0));
+        d.routeGuidance(msg(0, U16, i(1), 1, ENUM, i(1), 11, STR, s("0"), 12, ENUM, i(2), 13, U16, i(0)));
+        st = last("tbt ");
+        check("beta 2 (review 3): start with a U-turn (type 18) at 0: distance invalid too", st != null && st.contains(" 0.0 -3 "));
     }
 
 }
