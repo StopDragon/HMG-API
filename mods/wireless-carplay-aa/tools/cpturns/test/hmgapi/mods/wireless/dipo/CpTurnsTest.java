@@ -345,6 +345,11 @@ public final class CpTurnsTest {
         return msg(0, U16, i(1), 1, ENUM, i(state), 10, U32, i(meters), 11, STR, s(String.valueOf(meters)), 12, ENUM, i(2), 13, U16, i(0));
     }
 
+    /** rgAt과 같고, 지금 회전 번호(item 13)를 idx로 */
+    static Iap2NotiMsg rgAtIdx(int state, int meters, int idx) {
+        return msg(0, U16, i(1), 1, ENUM, i(state), 10, U32, i(meters), 11, STR, s(String.valueOf(meters)), 12, ENUM, i(2), 13, U16, i(idx));
+    }
+
     static String last(String prefix) {
         String r = null;
         for (String x : c.calls) if (x.startsWith(prefix)) r = x;
@@ -521,8 +526,11 @@ public final class CpTurnsTest {
         h.routeGuidance(rgAt(1, 900));
         check("1.7.2 M-4/M-5: highway exit right at 900 m (D 1050 m): display 17, direction 90, no side bits, bar 80",
                 "tbt 17 0 90.0 900.0 0 0 0 80 0".equals(last("tbt ")));
+        // 1.7.3(N-3): 나올 때는 D + 50m를 넘어야 멀리 있음. 1100m(= D + 50)는 아직 곧 회전, 1101m부터 멀리 있음
         h.routeGuidance(rgAt(1, 1100));
-        check("1.7.2 M-5: farther than D: far again (icon 164, bar invalid)", "tbt 164 0 0.0 1100.0 0 0 0 0 -1".equals(last("tbt ")));
+        check("1.7.3 N-3: 1100 m (D + 50 m) after near: still near (bar 90)", "tbt 17 0 90.0 1100.0 0 0 0 90 0".equals(last("tbt ")));
+        h.routeGuidance(rgAt(1, 1101));
+        check("1.7.2 M-5 (1.7.3 N-3): farther than D + 50 m: far again (icon 164, bar invalid)", "tbt 164 0 0.0 1101.0 0 0 0 0 -1".equals(last("tbt ")));
         c.calls.clear();
         // 일반 회전 400m(D 350m 밖): 멀리 있음. 340m: 곧 회전, 처음 거리 400m라 D 350m, 막대 90
         CpTurns g = new CpTurns(new android.content.Context(), c, null);
@@ -841,7 +849,70 @@ public final class CpTurnsTest {
         m15();
         phoneBar();
         beta2();
+        hyst173();
         System.exit(fail);
+    }
+
+    /** 곧 회전(1) / 멀리 있음(0) 배치 순서: 보낸 tbt 줄에서 배치가 바뀐 곳만 남긴다(13·17·25·31 = 곧 회전) */
+    static String layouts() {
+        StringBuilder b = new StringBuilder();
+        char prev = 0;
+        for (String x : c.calls) {
+            if (!x.startsWith("tbt ")) continue;
+            String d = x.split(" ")[1];
+            char k = ("13".equals(d) || "17".equals(d) || "18".equals(d) || "25".equals(d) || "31".equals(d)) ? '1' : '0';
+            if (k != prev) b.append(k);
+            prev = k;
+        }
+        return b.toString();
+    }
+
+    /** 1.7.3(N-3, #67): D 경계 근처 거리 흔들림에 작은↔큰 그림이 왔다갔다하지 않음(들어갈 때 D, 나올 때 D + 50m) */
+    static void hyst173() {
+        Car.unit = Car.DISTANCE_KM;
+        c = new Cluster();
+        CpTurns t = new CpTurns(new android.content.Context(), c, null);
+        t.clock = 9100000L;
+        check("1.7.3 N-3: exit margin 50 m", CpTurns.NEAR_EXIT_MARGIN == 50);
+        t.maneuver(nearManeuver(0, 2, 0, 0, 90, new int[] { 0, 90, -90, 180 }, -1, "Road A"));
+        for (int m : new int[] { 420, 380, 352, 349, 356, 345, 362, 351, 340, 399, 348, 300, 200 }) t.routeGuidance(rgAt(1, m));
+        check("1.7.3 N-3: 420..349..399..200 m around D 350 m: far, then near once, never back to far", "01".equals(layouts()));
+        c.calls.clear();
+        t.routeGuidance(rgAt(1, 400));
+        check("1.7.3 N-3: 400 m (D + 50) still near", "1".equals(layouts()));
+        c.calls.clear();
+        t.routeGuidance(rgAt(1, 401));
+        t.routeGuidance(rgAt(1, 380));
+        t.routeGuidance(rgAt(1, 351));
+        check("1.7.3 N-3: past D + 50 m: far, and stays far until D again (380, 351 m)", "0".equals(layouts()));
+        c.calls.clear();
+        t.routeGuidance(rgAt(1, 350));
+        check("1.7.3 N-3: back inside D (350 m): near", "1".equals(layouts()));
+        c.calls.clear();
+        // 다른 회전으로 바뀌면 히스테리시스는 새로 시작: 새 회전 370m는 멀리 있음
+        t.maneuver(nearManeuver(1, 2, 0, 0, 90, new int[] { 0, -90 }, -1, "Road B"));
+        t.routeGuidance(rgAtIdx(1, 370, 1));
+        check("1.7.3 N-3: a new maneuver at 370 m: far (the old turn's near doesn't carry over)",
+                last("tbt ") != null && !last("tbt ").startsWith("tbt 13 "));
+        c.calls.clear();
+        // 고속 출구 D 1050m: 1040 -> 1080 -> 1060 -> 1101
+        t.maneuver(nearManeuver(2, 23, 0, 0, 0, null, -1, "Exit Rd"));
+        for (int m : new int[] { 1200, 1060, 1040, 1080, 1060, 1100, 1020 }) t.routeGuidance(rgAtIdx(1, m, 2));
+        check("1.7.3 N-3: highway exit around 1050 m: far, then near once", "01".equals(layouts()));
+        t.routeGuidance(rgAtIdx(1, 1101, 2));
+        check("1.7.3 N-3: highway exit past 1100 m: far again", "010".equals(layouts()));
+
+        // 1.7.3 추가(로그 H 확인): 카플레이는 같은 회전의 도로 이름만 바뀌어도(같은 번호, after road A<->B) 곧 회전이 끊기지 않는다
+        c.calls.clear();
+        t.maneuver(nearManeuver(3, 2, 0, 0, 90, new int[] { 0, 90 }, -1, "Road A"));
+        t.routeGuidance(rgAtIdx(1, 300, 3));
+        for (int k = 0; k < 10; k++) {
+            t.maneuver(nearManeuver(3, 2, 0, 0, 90, new int[] { 0, 90 }, -1, k % 2 == 0 ? "Road B" : "Road A"));
+            t.routeGuidance(msg(0, U16, i(1), 1, ENUM, i(1), 11, STR, s("300"), 13, U16, i(3)));   // 거리(item 10) 없는 갱신
+            t.routeGuidance(rgAtIdx(1, 300 - k * 5, 3));
+        }
+        check("1.7.3 name only (CarPlay): same maneuver, road A<->B, with and without distance updates: near the whole time", "01".equals(layouts()) || "1".equals(layouts()));
+        check("1.7.3 name only (CarPlay): no far frame after the first near", layouts().endsWith("1") && layouts().indexOf("10") < 0);
     }
 
     /** 1.7.2 시험판 3: 카플레이 막대를 순정 단속 정보 프레임에도(PhoneBarOut 방송) */

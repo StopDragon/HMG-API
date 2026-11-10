@@ -132,6 +132,12 @@ public final class AaTurnsTest {
         stockReplay();
         m15();
         phoneBar();
+        aa173();
+        aa173review();
+        aaNameOnly();
+        aaNameOnlyReview();
+        aaStage6();
+        scenarioTable();
         check("2nd review 6: a MAC is masked completely, other text only as a length, null as null",
                 "xx:xx:xx:xx:xx:xx".equals(Mac.mask("A1:B2:C3:D4:E5:F6")) && !Mac.mask("A1:B2:C3:D4:E5:F6").contains("F6")
                         && "(6 chars)".equals(Mac.mask("iPhone")) && "null".equals(Mac.mask(null)));
@@ -205,6 +211,689 @@ public final class AaTurnsTest {
     }
 
     /** Korea Projection 2.3.0: Korean stock GPM ramps, crossroad name on change, turn log, 2C, StockLog */
+    /** 보낸 tbt 줄의 표시 번호를 바뀐 곳만 차례로(예: "173 65") */
+    static String icons() {
+        StringBuilder b = new StringBuilder();
+        String prev = null;
+        for (String x : c.calls) {
+            if (!x.startsWith("tbt ")) continue;
+            String d = x.split(" ")[1];
+            if (d.equals(prev)) continue;
+            if (b.length() > 0) b.append(' ');
+            b.append(d);
+            prev = d;
+        }
+        return b.toString();
+    }
+
+    /** 1.7.3(모드 2.4.1): A-2 이름 바뀜 붙잡기(#65)와 N-3 곧 회전 경계 히스테리시스(#67) */
+    static void aa173() {
+        final int RIGHT = 2, UNSPEC = 3, LEFT = 1, FORK = 9, NAME = 2, TURN = 4, OFF_RAMP = 8, METERS = 1;
+        Car.unit = Car.DISTANCE_KM;
+        c = new Cluster();
+        AaTurns t = new AaTurns(new android.content.Context(), c, new Handler());
+        final java.util.List<String> log = new java.util.ArrayList<String>();
+        t.log = new AaTurns.Sink() {
+            @Override
+            public void line(String s) {
+                log.add(s);
+            }
+        };
+        t.clock = 20000000L;
+        t.status(1);
+        // #65 07:16:31~07:17:23: 갈림길(9, 오른쪽)과 이름 바뀜(2, 방향 없음)이 2~4초마다 번갈아 옴, 거리는 줄어듦
+        t.nextTurn("Fork Rd", RIGHT, FORK, -1, 0);
+        t.nextTurnDistance(2000, 90, 2000, METERS);
+        int m = 2000;
+        for (int k = 0; k < 10; k++) {
+            t.clock += 3000L;
+            m -= 120;
+            if (k % 2 == 0) t.nextTurn("Name Rd", UNSPEC, NAME, -1, 0);
+            else t.nextTurn("Fork Rd", RIGHT, FORK, -1, 0);
+            t.nextTurnDistance(m, 60, m, METERS);
+        }
+        check("1.7.3 A-2: fork and name change alternating (#65): the icon stays 173 (no 65)", "173".equals(icons()));
+        check("1.7.3 A-2: a log line says the name change kept the icon (numbers only)",
+                log.contains("AA: name change kept icon 173 (ev 9)"));
+        c.calls.clear();
+        // 이름만 바뀜: 곧 회전(D 안)에서 이름 바뀜이 오면 아이콘은 큰 그림(25) 그대로, 도로 이름만 바뀐다
+        t.clock += 2000L;
+        t.nextTurn("Fork Rd", RIGHT, FORK, -1, 0);
+        t.nextTurnDistance(300, 20, 300, METERS);
+        check("1.7.3 A-2: the fork at 300 m: near fork 25", last("tbt ").startsWith("tbt 25 ") && "road [Fork Rd]".equals(last("road ")));
+        c.calls.clear();
+        t.clock += 2000L;
+        t.nextTurn("Name Rd", UNSPEC, NAME, -1, 0);
+        check("A-2 rule: the name change alone sends nothing (decided at the next distance)", c.calls.isEmpty() && t.namePend);
+        t.nextTurnDistance(300, 20, 300, METERS);
+        check("1.7.3 A-2: name change inside D, next distance the same (300 m): still the near fork (25), only the road name changes",
+                "25".equals(icons()) && "road [Name Rd]".equals(last("road ")) && last("tbt ").startsWith("tbt 25 "));
+        t.clock += 2000L;
+        t.nextTurnDistance(280, 18, 280, METERS);
+        check("1.7.3 A-2: its distance (280 m, same stretch): still the fork, near (25), the name change's road",
+                "25".equals(icons()) && last("tbt ").startsWith("tbt 25 ") && "road [Name Rd]".equals(last("road ")));
+        c.calls.clear();
+        // 갈림길을 지남: 남은 거리가 크게 늘면(30m -> 1500m) 붙잡아 둔 이름 바뀜이 다음 회전이 된다(65)
+        t.clock += 2000L;
+        t.nextTurnDistance(30, 2, 30, METERS);
+        t.clock += 2000L;
+        t.nextTurnDistance(1500, 80, 1500, METERS);
+        check("1.7.3 A-2: past the fork (30 m -> 1.5 km): the held name change takes over (65)", "65".equals(last("tbt ").split(" ")[1]));
+        c.calls.clear();
+        // 실제 회전 이벤트가 15초 넘게 오지 않으면(폰이 이름 바뀜만 보냄) 붙잡기를 풀어 순정대로 이름 바뀜을 보인다
+        t.clock += 2000L;
+        t.nextTurn("Turn Rd", RIGHT, TURN, -1, 0);
+        t.nextTurnDistance(1200, 60, 1200, METERS);
+        t.clock += 3000L;
+        t.nextTurn("Name Rd 2", UNSPEC, NAME, -1, 0);
+        t.clock += AaTurns.NAME_HOLD_MS;
+        t.nextTurnDistance(1100, 55, 1100, METERS);
+        check("1.7.3 A-2: no real turn event for 15 s: the name change shows (67 -> 65)", "67 65".equals(icons()));
+        c.calls.clear();
+        t.clock += 2000L;
+        t.nextTurn("Turn Rd", RIGHT, TURN, -1, 0);
+        t.nextTurnDistance(1000, 50, 1000, METERS);
+        t.clock += AaTurns.NAME_HOLD_MS + 1L;
+        t.nextTurn("Name Rd 3", UNSPEC, NAME, -1, 0);
+        check("1.7.3 A-2: a name change 15 s after the last real turn: shown as stock (65)", "67 65".equals(icons()));
+        c.calls.clear();
+        // 이름 바뀜 다음 이름 바뀜(실제 회전 없음), 출발·목적지: 붙잡지 않는다(순정대로)
+        t.clock += 2000L;
+        t.nextTurn("Name Rd 4", UNSPEC, NAME, -1, 0);
+        check("1.7.3 A-2: name change after a name change: nothing held (65)", "65".equals(icons()) && !t.nameHeld);
+        // 재탐색·새 경로에서는 붙잡은 것을 버린다
+        t.nextTurn("Fork Rd", RIGHT, FORK, -1, 0);
+        t.nextTurn("Name Rd", UNSPEC, NAME, -1, 0);
+        check("1.7.3 A-2: waiting for the next distance while the fork is on", t.namePend);
+        t.status(3);
+        check("1.7.3 A-2: rerouting drops the waiting name change", !t.nameHeld && !t.namePend && t.nameRoad == null);
+        t.status(1);
+        t.nextTurn("Name Rd", UNSPEC, NAME, -1, 0);
+        check("1.7.3 A-2: after rerouting, a name change isn't held by the old fork", !t.nameHeld);
+        t.status(2);
+
+        // N-3: 곧 회전 경계 히스테리시스(카플레이와 같은 규칙)
+        c = new Cluster();
+        t = new AaTurns(new android.content.Context(), c, new Handler());
+        t.clock = 30000000L;
+        t.status(1);
+        check("1.7.3 N-3: AA exit margin 50 m (as CarPlay)", AaTurns.NEAR_EXIT_MARGIN == 50);
+        t.nextTurn("Road A", RIGHT, TURN, -1, 0);
+        for (int d : new int[] { 420, 380, 352, 349, 356, 345, 362, 351, 340, 399, 348, 360 }) {
+            t.clock += 1000L;
+            t.nextTurnDistance(d, 20, d, METERS);
+        }
+        check("1.7.3 N-3: 420..349..399..360 m around D 350 m: small picture, then the near one once (67 13)", "67 13".equals(icons()));
+        c.calls.clear();
+        t.nextTurnDistance(400, 20, 400, METERS);
+        check("1.7.3 N-3: 400 m (D + 50) still near", "13".equals(icons()));
+        c.calls.clear();
+        t.nextTurnDistance(401, 20, 401, METERS);
+        t.nextTurnDistance(380, 20, 380, METERS);
+        t.nextTurnDistance(351, 20, 351, METERS);
+        check("1.7.3 N-3: past D + 50 m: far, and stays far until D again", "67".equals(icons()));
+        c.calls.clear();
+        t.nextTurnDistance(350, 20, 350, METERS);
+        check("1.7.3 N-3: back inside D (350 m): near", "13".equals(icons()));
+        c.calls.clear();
+        t.nextTurn("Road B", LEFT, TURN, -1, 0);
+        t.nextTurnDistance(370, 20, 370, METERS);
+        check("1.7.3 N-3: a new turn at 370 m: far (the old turn's near doesn't carry over)", "70".equals(icons()));
+        c.calls.clear();
+        t.nextTurn("Exit 5", RIGHT, OFF_RAMP, -1, 0);
+        for (int d : new int[] { 1200, 1060, 1040, 1080, 1060, 1100, 1020 }) t.nextTurnDistance(d, 50, d, METERS);
+        check("1.7.3 N-3: highway exit around D 1050 m: far, then near once (164 17)", "164 17".equals(icons()));
+        t.nextTurnDistance(1101, 50, 1101, METERS);
+        check("1.7.3 N-3: highway exit past 1100 m: far again (164 17 164)", "164 17 164".equals(icons()));
+
+        // 리뷰 4: 이름 없는 길의 같은 방향 연속 회전(열쇠가 같음). 앞 회전을 지나 다음 회전이 390m면 멀리 있음(큰 그림 아님)
+        c.calls.clear();
+        t.nextTurn("", RIGHT, TURN, -1, 0);
+        for (int d : new int[] { 600, 300, 120, 20 }) t.nextTurnDistance(d, 20, d, METERS);
+        t.nextTurn("", RIGHT, TURN, -1, 0);
+        t.nextTurnDistance(390, 30, 390, METERS);
+        check("1.7.3 N-3 (review 4): two right turns on an unnamed road, the next at 390 m: far (67), not the near picture",
+                last("tbt ").startsWith("tbt 67 "));
+        t.nextTurnDistance(340, 25, 340, METERS);
+        t.nextTurnDistance(385, 25, 385, METERS);
+        check("1.7.3 N-3 (review 4): then inside D (340 m) near, and a 45 m wobble (385 m) stays near", last("tbt ").startsWith("tbt 13 "));
+        t.status(2);
+    }
+
+    /** 리뷰 반영(1·5·6): 회전을 지난 뒤 거리가 이름 바뀜보다 먼저 와도 지난 큰 그림이 남지 않음, 포커스 순정·HUD 이름, 로그 줄 수 */
+    static void aa173review() {
+        final int RIGHT = 2, UNSPEC = 3, FORK = 9, NAME = 2, TURN = 4, METERS = 1;
+        Car.unit = Car.DISTANCE_KM;
+        c = new Cluster();
+        AaTurns t = new AaTurns(new android.content.Context(), c, new Handler());
+        final java.util.List<String> log = new java.util.ArrayList<String>();
+        t.log = new AaTurns.Sink() {
+            @Override
+            public void line(String s) {
+                log.add(s);
+            }
+        };
+        t.clock = 40000000L;
+        t.status(1);
+        check("review 1: hold time 8 s (the #65 events came every 2-4 s)", AaTurns.NAME_HOLD_MS == 8000L);
+        // 리뷰어 재현: 우회전 곧 회전(큰 그림 13) → 지남 → 다음 단계 거리(1500m)가 먼저 → 이름 바뀜 → 거리 줄어듦
+        t.nextTurn("Turn Rd", RIGHT, TURN, -1, 0);
+        t.nextTurnDistance(200, 20, 200, METERS);
+        t.clock += 1000L;
+        t.nextTurnDistance(15, 2, 15, METERS);
+        check("review 1: the right turn at 15 m: near (13)", last("tbt ").startsWith("tbt 13 "));
+        c.calls.clear();
+        t.clock += 1000L;
+        t.nextTurnDistance(1500, 80, 1500, METERS);
+        t.clock += 500L;
+        t.nextTurn("Next Rd", UNSPEC, NAME, -1, 0);
+        check("review 1: distance first (1.5 km), then the name change: not held, the name change shows (65) at once",
+                !t.nameHeld && last("tbt ").startsWith("tbt 65 "));
+        for (int k = 0; k < 5; k++) {
+            t.clock += 2000L;
+            t.nextTurnDistance(1400 - k * 100, 70, 1400 - k * 100, METERS);
+        }
+        check("review 1: from the 1.5 km update on: never the near right-turn picture (no tbt 13), 65 to the end", "67 65".equals(icons()) && !c.calls.toString().contains("tbt 13 "));
+        // 다음 실제 회전 이벤트가 오면 다시 붙잡을 수 있다
+        t.clock += 1000L;
+        t.nextTurn("Fork Rd", RIGHT, FORK, -1, 0);
+        t.nextTurnDistance(900, 50, 900, METERS);
+        t.clock += 2000L;
+        t.nextTurn("Name Rd", UNSPEC, NAME, -1, 0);
+        t.nextTurnDistance(880, 48, 880, METERS);
+        check("review 1: the next real turn (fork) clears 'passed': a name change is held again", t.nameHeld && last("tbt ").startsWith("tbt 173 "));
+        // HUD 목록 이름(리뷰 5): 붙잡는 동안 HUD 목록 프레임에 이름 바뀜의 도로 이름이 나간다(아이콘은 173 그대로)
+        check("review 5: the HUD list carries the name change's road with the fork icon (173 = 0xad)",
+                ("hud f201ad0000" + utf16("Name Rd")).equals(last("hud ")));
+        // 8초 넘게 실제 회전이 없으면 풂
+        t.clock += AaTurns.NAME_HOLD_MS;
+        t.nextTurnDistance(850, 45, 850, METERS);
+        check("review 1: no real turn for 8 s: the held name change shows (65)", !t.nameHeld && last("tbt ").startsWith("tbt 65 "));
+        // 포커스 순정(stop)이면 붙잡기를 버림(리뷰 5)
+        t.clock += 1000L;
+        t.nextTurn("Fork Rd", RIGHT, FORK, -1, 0);
+        t.nextTurn("Name Rd", UNSPEC, NAME, -1, 0);
+        t.nextTurnDistance(840, 45, 840, METERS);
+        check("A-2 rule: a name change after a new turn event has no reference distance yet: waits one more sample", t.namePend && !t.nameHeld);
+        t.nextTurnDistance(835, 45, 835, METERS);
+        check("review 5: held before the focus goes to the car's navigation", t.nameHeld);
+        t.stop();
+        check("review 5: focus native (stop): the hold is dropped", !t.nameHeld && t.nameRoad == null && !t.turnPassed);
+        // 로그 줄 수는 연결 끝에서 0으로(리뷰 6)
+        check("review 6: hold log lines counted", t.nameHoldLogs > 0);
+        t.end();
+        check("review 6: the connection end resets the hold log count", t.nameHoldLogs == 0);
+    }
+
+    /** 1.7.3 추가(로그 H, #65·#67·#71·#104): 같은 회전에서 도로 이름만 2초마다 A↔B로 바뀌어도 곧 회전이 끊기지 않음 */
+    static void aaNameOnly() {
+        final int RIGHT = 2, LEFT = 1, TURN = 4, METERS = 1;
+        Car.unit = Car.DISTANCE_KM;
+        c = new Cluster();
+        AaTurns t = new AaTurns(new android.content.Context(), c, new Handler());
+        t.clock = 50000000L;
+        t.status(1);
+        t.nextTurn("Road A", RIGHT, TURN, -1, 0);
+        t.nextTurnDistance(300, 20, 300, METERS);
+        c.calls.clear();
+        int m = 300;
+        for (int k = 0; k < 30; k++) {
+            t.clock += 2000L;
+            t.nextTurn(k % 2 == 0 ? "Road B" : "Road A", RIGHT, TURN, -1, 0);   // 이름만 바뀜(종류·방향·각도 같음)
+            t.clock += 10L;
+            if (k % 3 == 0 && m > 20) m -= 10;
+            t.nextTurnDistance(m, 20, m, METERS);
+        }
+        boolean noFar = true;
+        for (String x : c.calls) if (x.startsWith("tbt ") && !x.startsWith("tbt 13 ")) noFar = false;
+        check("1.7.3 name only: same turn, road A<->B every 2 s at ~300 m: never a far frame (only tbt 13)", noFar && "13".equals(icons()));
+        check("1.7.3 name only: the road name still follows the phone", "road [Road A]".equals(last("road ")));
+        // 다른 회전(방향이 다름)이면 지금처럼 새로 시작: 자기 거리가 올 때까지 멀리 있음
+        c.calls.clear();
+        t.nextTurn("Road C", LEFT, TURN, -1, 0);
+        check("1.7.3 name only: a different turn (left) starts over: far until its own distance", last("tbt ").startsWith("tbt 70 "));
+        t.nextTurnDistance(250, 20, 250, METERS);
+        check("1.7.3 name only: then near with its own distance", last("tbt ").startsWith("tbt 13 ") && last("tbt ").contains(" 250.0 "));
+        // 이름 없는 같은 방향 연속 회전 규칙과 함께: 이름만 바뀐 다음 회전이 앞 회전을 지나 390m면 새 회전(멀리 있음)
+        c.calls.clear();
+        t.nextTurnDistance(20, 2, 20, METERS);
+        t.nextTurn("Road D", LEFT, TURN, -1, 0);
+        t.nextTurnDistance(390, 30, 390, METERS);
+        check("1.7.3 name only + review 4: next same-direction turn with another name, past the old one, at 390 m: far (70)",
+                last("tbt ").startsWith("tbt 70 "));
+        t.status(2);
+    }
+
+    /** 1.7.3 "도로 이름만 바뀔 때" 리뷰: 연속 갈림길 붙잡기, 이름만 다른 새 회전에서 옛 거리 프레임 없음, 히스테리시스 띠 */
+    static void aaNameOnlyReview() {
+        final int RIGHT = 2, UNSPEC = 3, FORK = 9, NAME = 2, TURN = 4, METERS = 1;
+        Car.unit = Car.DISTANCE_KM;
+        c = new Cluster();
+        AaTurns t = new AaTurns(new android.content.Context(), c, new Handler());
+        t.clock = 60000000L;
+        t.status(1);
+        // 리뷰 1: 같은 방향 갈림길 두 개. 앞 갈림길(A)을 10m에서 지나고 다음 갈림길(B) 이벤트, 그 첫 거리 900m, 이어 이름 바뀜이 번갈아
+        t.nextTurn("Fork A", RIGHT, FORK, -1, 0);
+        for (int d : new int[] { 900, 400, 100, 10 }) {
+            t.clock += 1000L;
+            t.nextTurnDistance(d, 20, d, METERS);
+        }
+        t.clock += 1000L;
+        t.nextTurn("Fork B", RIGHT, FORK, -1, 0);
+        t.clock += 10L;
+        t.nextTurnDistance(900, 50, 900, METERS);
+        check("name-only review 1: the next fork's first distance (900 m after 10 m) doesn't count as 'passed' for it", !t.turnPassed);
+        c.calls.clear();
+        int m = 880;
+        for (int k = 0; k < 8; k++) {
+            t.clock += 3000L;
+            m -= 60;
+            if (k % 2 == 0) t.nextTurn("Name Rd", UNSPEC, NAME, -1, 0);
+            else t.nextTurn("Fork B", RIGHT, FORK, -1, 0);
+            t.nextTurnDistance(m, 40, m, METERS);
+        }
+        check("name-only review 1: consecutive same-side forks: the second fork's name changes are held too (173 only, no 65)", "173".equals(icons()));
+        // 리뷰 3: 곧 회전이 바뀐 직후의 모든 tbt 프레임에 지난 곧 회전(옛 거리)이 없다
+        t.status(2);
+        c = new Cluster();
+        t = new AaTurns(new android.content.Context(), c, new Handler());
+        t.clock = 61000000L;
+        t.status(1);
+        t.nextTurn("Road A", RIGHT, TURN, -1, 0);
+        for (int d : new int[] { 300, 120, 15 }) t.nextTurnDistance(d, 20, d, METERS);
+        check("name-only review 2: the right turn at 15 m: near", last("tbt ").startsWith("tbt 13 "));
+        c.calls.clear();
+        t.nextTurn("Road B", RIGHT, TURN, -1, 0);   // 이름만 다른 같은 방향 다음 회전
+        check("name-only review 2: a same-side turn with another name: no frame at once (judged at its distance)", c.calls.isEmpty() || last("tbt ") == null);
+        t.nextTurnDistance(420, 30, 420, METERS);
+        boolean stale = false;
+        for (String x : c.calls) if (x.startsWith("tbt 13 ")) stale = true;
+        check("name-only review 3: every tbt frame after the turn changed: no near picture with the old distance (only far 67)",
+                !stale && "67".equals(icons()) && "road []".equals(last("road ")));
+        // 리뷰 3: 히스테리시스 띠(380m, D와 D+50 사이)에서 이름만 바뀌어도 곧 회전 유지(열쇠에 이름이 없음)
+        for (int d : new int[] { 340, 300 }) t.nextTurnDistance(d, 20, d, METERS);
+        t.nextTurnDistance(380, 25, 380, METERS);
+        check("name-only review 3: near at 380 m (inside D + 50 after being near)", last("tbt ").startsWith("tbt 13 "));
+        c.calls.clear();
+        t.nextTurn("Road B2", RIGHT, TURN, -1, 0);
+        t.nextTurnDistance(382, 25, 382, METERS);
+        boolean far = false;
+        for (String x : c.calls) if (x.startsWith("tbt ") && !x.startsWith("tbt 13 ")) far = true;
+        check("name-only review 3: only the name changes at 380 m (hysteresis band): stays near, the new name shown",
+                !far && last("tbt ").startsWith("tbt 13 ") && "road [Road B2]".equals(last("road ")));
+        t.status(2);
+    }
+
+    /** 6단계 전체 리뷰 M1·L1·L2 */
+    static void aaStage6() {
+        final int RIGHT = 2, LEFT = 1, UNSPEC = 3, FORK = 9, NAME = 2, TURN = 4, METERS = 1;
+        Car.unit = Car.DISTANCE_KM;
+        c = new Cluster();
+        Handler h = new Handler();
+        AaTurns t = new AaTurns(new android.content.Context(), c, h);
+        t.clock = 70000000L;
+        t.status(1);
+        // M1 리뷰어 재현: 좌회전 10m → 이름 바뀜 → 다음 지점이 가까움(55, 52, 49m): 좌회전 큰 그림이 남지 않음
+        t.nextTurn("Left Rd", LEFT, TURN, -1, 0);
+        for (int d : new int[] { 300, 100, 10 }) {
+            t.clock += 1000L;
+            t.nextTurnDistance(d, 10, d, METERS);
+        }
+        check("stage 6 M1: the left turn at 10 m: near (13)", last("tbt ").startsWith("tbt 13 "));
+        c.calls.clear();
+        t.clock += 500L;
+        t.nextTurn("Next Rd", UNSPEC, NAME, -1, 0);
+        check("A-2 rule (was stage 6 M1): a name change at 10 m: nothing sent until the next distance", last("tbt ") == null && t.namePend);
+        for (int d : new int[] { 55, 52, 49, 46 }) {
+            t.clock += 1500L;
+            t.nextTurnDistance(d, 5, d, METERS);
+        }
+        check("stage 6 M1: then 55 m (grew): the name change shows (65), and 52, 49 m never bring the left-turn picture back (no tbt 13)",
+                !c.calls.toString().contains("tbt 13 ") && "65".equals(icons()) && !t.nameHeld);
+        t.status(2);
+        // M1: 붙잡은 뒤 거리가 15m 넘게 늘면 풂(폰이 다음 안내를 이름 바뀜으로 바꿈)
+        c = new Cluster();
+        h = new Handler();
+        t = new AaTurns(new android.content.Context(), c, h);
+        t.clock = 71000000L;
+        t.status(1);
+        t.nextTurn("Left Rd", LEFT, TURN, -1, 0);
+        t.nextTurnDistance(300, 20, 300, METERS);
+        t.clock += 2000L;
+        t.nextTurn("Next Rd", UNSPEC, NAME, -1, 0);
+        check("A-2 rule: a name change at 300 m: waiting for the next distance", t.namePend);
+        t.clock += 1000L;
+        t.nextTurnDistance(290, 20, 290, METERS);
+        check("A-2 rule: next distance shorter (290 m): same point, held (the #65 alternation stays blocked)", t.nameHeld && last("tbt ").startsWith("tbt 13 "));
+        t.clock += 1000L;
+        t.nextTurnDistance(296, 20, 296, METERS);
+        check("A-2 rule: a 6 m rise (> 5 m wobble) after holding: released, the name change shows (65)", !t.nameHeld && last("tbt ").startsWith("tbt 65 "));
+        t.status(2);
+        // L1: 연속 갈림길. 갈림길 A 큰 그림(300m) → 이름만 다른 갈림길 B 이벤트 → 거리 전에 이름 바뀜(붙잡힘): 프레임 없음
+        c = new Cluster();
+        h = new Handler();
+        t = new AaTurns(new android.content.Context(), c, h);
+        t.clock = 72000000L;
+        t.status(1);
+        t.nextTurn("Fork A", RIGHT, FORK, -1, 0);
+        t.nextTurnDistance(300, 20, 300, METERS);
+        check("stage 6 L1: fork A at 300 m: near fork (25)", last("tbt ").startsWith("tbt 25 "));
+        c.calls.clear();
+        t.clock += 500L;
+        t.nextTurn("Fork B", RIGHT, FORK, -1, 0);
+        t.clock += 500L;
+        t.nextTurn("Name Rd", UNSPEC, NAME, -1, 0);
+        check("stage 6 L1: fork B (name only differs) then a name change before B's distance: no frame with fork A's distance",
+                t.namePend && t.samePend && last("tbt ") == null);
+        t.clock += 100L;
+        t.nextTurnDistance(900, 50, 900, METERS);
+        check("stage 6 L1: fork B's own distance (900 m): far fork (173), never the near picture in between",
+                last("tbt ").startsWith("tbt 173 ") && !c.calls.toString().contains("tbt 25 "));
+        t.status(2);
+        // L2: 이름만 다른 같은 방향 다음 회전 뒤 거리가 안 오면 1초 뒤 한 번 멀리 있음(2.4.0 동작), 반복 없음
+        c = new Cluster();
+        h = new Handler();
+        t = new AaTurns(new android.content.Context(), c, h);
+        t.clock = 73000000L;
+        t.status(1);
+        t.nextTurn("Road A", RIGHT, TURN, -1, 0);
+        for (int d : new int[] { 200, 15 }) t.nextTurnDistance(d, 5, d, METERS);
+        c.calls.clear();
+        t.nextTurn("Road B", RIGHT, TURN, -1, 0);
+        check("stage 6 L2: a same-side turn with another name: nothing at once, a one-shot 1 s timer set",
+                c.calls.isEmpty() && h.pending.contains(t.nameDue) && AaTurns.PEND_WAIT_MS == 2000L);
+        check("stage 6 L2: no distance within 1 s: one far frame (67, bar invalid) and the old near picture is gone",
+                h.runPending(t.nameDue) && last("tbt ").startsWith("tbt 67 ") && last("tbt ").endsWith(" 0 -1") && !t.samePend);
+        check("stage 6 L2: the timer doesn't come back (one-shot)", !h.pending.contains(t.nameDue));
+        t.nextTurnDistance(400, 20, 400, METERS);
+        check("stage 6 L2: then its own distance (400 m): far as a new turn", last("tbt ").startsWith("tbt 67 ") && last("tbt ").contains(" 400.0 "));
+        // 거리가 제때 오면 기한 취소
+        t.nextTurnDistance(15, 2, 15, METERS);
+        t.nextTurn("Road C", RIGHT, TURN, -1, 0);
+        t.nextTurnDistance(380, 20, 380, METERS);
+        check("stage 6 L2: the distance came in time: the timer is cancelled", !h.pending.contains(t.nameDue) && !t.samePend);
+        // 새 이벤트·끝·포커스 순정이면 취소
+        t.nextTurnDistance(15, 2, 15, METERS);
+        t.nextTurn("Road D", RIGHT, TURN, -1, 0);
+        t.nextTurn("Road E", LEFT, TURN, -1, 0);
+        check("stage 6 L2: a different turn event cancels the timer", !h.pending.contains(t.nameDue));
+        t.nextTurnDistance(15, 2, 15, METERS);
+        t.nextTurn("Road F", LEFT, TURN, -1, 0);
+        t.stop();
+        check("stage 6 L2: focus to the car's navigation (stop) cancels the timer", !h.pending.contains(t.nameDue) && !t.samePend);
+        t.focusPhone();
+        t.nextTurn("Road F", LEFT, TURN, -1, 0);
+        t.nextTurnDistance(15, 2, 15, METERS);
+        t.nextTurn("Road G", LEFT, TURN, -1, 0);
+        t.end();
+        check("stage 6 L2: the connection end cancels the timer", !h.pending.contains(t.nameDue) && !t.samePend);
+    }
+
+    /**
+     * A-2 규칙 시나리오 표의 한 줄: 가짜 시계 하나로 이벤트·거리·기다림을 돌리고, 기한 타이머는 걸린 시각에 돈다.
+     * 계기판 tbt 프레임마다 시각을 붙여 "지난 회전 그림이 남은 시간"과 "아이콘이 바뀐 횟수"를 잰다.
+     */
+    static final class Sc {
+        static final int RIGHT = 2, LEFT = 1, UNSPEC = 3, FORK = 9, NAME = 2, TURN = 4, METERS = 1;
+        final Cluster cl = new Cluster();
+        final Handler h = new Handler();
+        final AaTurns t;
+        /** {시각, 표시 번호} */
+        final List<long[]> frames = new java.util.ArrayList<long[]>();
+        long passAt = -1, markAt;
+        java.util.Set<Integer> old = new java.util.HashSet<Integer>();
+
+        Sc(boolean nameHold) {
+            Car.unit = Car.DISTANCE_KM;
+            t = new AaTurns(new android.content.Context(), cl, h);
+            t.nameHold = nameHold;
+            t.clock = 90000000L;
+            sync();
+            t.status(1);
+            stamp();
+        }
+
+        void sync() { Handler.now = t.clock; }
+
+        void stamp() {
+            for (String x : cl.calls) if (x.startsWith("tbt ")) frames.add(new long[] { t.clock, Integer.parseInt(x.split(" ")[1]) });
+            cl.calls.clear();
+        }
+
+        Sc ev(String road, int side, int e) { sync(); t.nextTurn(road, side, e, -1, 0); stamp(); return this; }
+        Sc dist(int m) { sync(); t.nextTurnDistance(m, 20, m, METERS); stamp(); return this; }
+        Sc st(int s) { sync(); t.status(s); stamp(); return this; }
+
+        /** ms만큼 시간이 흐른다: 그 사이 걸린 타이머를 시각 차례로 돌린다 */
+        Sc after(long ms) {
+            long until = t.clock + ms;
+            while (true) {
+                Runnable next = null;
+                long at = Long.MAX_VALUE;
+                for (Runnable r : h.pending) {
+                    Long d = h.dueAt.get(r);
+                    if (d != null && d <= until && d < at) { at = d; next = r; }
+                }
+                if (next == null) break;
+                t.clock = Math.max(t.clock, at);
+                sync();
+                h.runPending(next);
+                stamp();
+            }
+            t.clock = until;
+            sync();
+            return this;
+        }
+
+        /** 지금 회전을 지났다(또는 끝났다): 이 표시 번호들이 "지난 회전 그림" */
+        Sc pass(int... displays) {
+            passAt = t.clock;
+            old.clear();
+            for (int d : displays) old.add(d);
+            return this;
+        }
+
+        Sc mark() { markAt = t.clock; return this; }
+
+        /** 지난 회전 그림이 pass 뒤에 남은 시간(ms). 끝까지 남았으면 지금까지 */
+        long oldLeft() {
+            int shown = -1;
+            for (long[] f : frames) if (f[0] <= passAt) shown = (int) f[1];
+            if (!old.contains(shown)) {
+                // pass 때 이미 다른 그림이었더라도 뒤에 지난 그림이 다시 나가면 그 길이를 잰다
+                shown = -1;
+            }
+            long start = old.contains(shown) ? passAt : -1, worst = 0;
+            for (long[] f : frames) {
+                if (f[0] < passAt) continue;
+                boolean isOld = old.contains((int) f[1]);
+                if (isOld && start < 0) start = f[0];
+                if (!isOld && start >= 0) { worst = Math.max(worst, f[0] - start); start = -1; }
+            }
+            if (start >= 0) worst = Math.max(worst, t.clock - start);
+            return worst;
+        }
+
+        /** mark 뒤 아이콘(표시 번호)이 바뀐 횟수 */
+        int changes() {
+            int n = 0, prev = Integer.MIN_VALUE;
+            for (long[] f : frames) {
+                if (f[0] <= markAt) { prev = (int) f[1]; continue; }
+                if (prev != Integer.MIN_VALUE && f[1] != prev) n++;
+                prev = (int) f[1];
+            }
+            return n;
+        }
+
+        boolean sent(int display) {
+            for (long[] f : frames) if (f[0] >= markAt && f[1] == display) return true;
+            return false;
+        }
+    }
+
+    /** 한 줄 확인: 지난 그림 최대 ms, 아이콘 바뀜 최대 횟수 */
+    static void row(String name, Sc x, long maxOld, int maxChanges, boolean extra) {
+        long o = x.passAt < 0 ? 0 : x.oldLeft();
+        int ch = x.changes();
+        check(String.format("A-2 table: %-62s old picture %5d ms (max %5d), icon changes %d (max %d)", name, o, maxOld, ch, maxChanges),
+                o <= maxOld && ch <= maxChanges && extra);
+    }
+
+    /** A-2 규칙 시나리오 표(지금까지 리뷰가 재현한 꼴 모두) */
+    static void scenarioTable() {
+        final int R = Sc.RIGHT, L = Sc.LEFT, U = Sc.UNSPEC, FORK = Sc.FORK, NAME = Sc.NAME, TURN = Sc.TURN;
+        // 1. #65 번갈아(300m 근처, 거리가 옴): 갈림길 아이콘만, 이름 바뀜(65) 없음
+        Sc x = new Sc(true);
+        x.ev("Fork", R, FORK).dist(700).after(1000).mark();
+        int m = 680;
+        for (int k = 0; k < 12; k++) {
+            x.after(1500).ev(k % 2 == 0 ? "Name" : "Fork", k % 2 == 0 ? U : R, k % 2 == 0 ? NAME : FORK);
+            x.after(500).dist(m -= 40);
+        }
+        row("#65 alternation around 300 m, distances coming", x, 0, 1, !x.sent(65));
+        // 2. #65 번갈아 40m 정체(같은 거리가 옴): 깜빡임 없음
+        x = new Sc(true);
+        x.ev("Fork", R, FORK).dist(40).mark();
+        for (int k = 0; k < 10; k++) x.after(1500).ev(k % 2 == 0 ? "Name" : "Fork", k % 2 == 0 ? U : R, k % 2 == 0 ? NAME : FORK).after(500).dist(40);
+        row("#65 alternation stopped at 40 m, distance repeated", x, 0, 0, !x.sent(65));
+        // 3. #65 번갈아 40m 정체, 거리가 안 옴: 2초 기한마다 풀림(원칙: 깜빡임을 받아들임)
+        x = new Sc(true);
+        x.ev("Fork", R, FORK).dist(40).mark();
+        for (int k = 0; k < 4; k++) x.after(3000).ev(k % 2 == 0 ? "Name" : "Fork", k % 2 == 0 ? U : R, k % 2 == 0 ? NAME : FORK);
+        x.after(3000);
+        row("#65 alternation stopped at 40 m, no distance, every 3 s (accepted flicker)", x, 0, 4, x.sent(65));
+        // 3b. 같은 꼴인데 1초마다(기한 2초 안): 깜빡임 없음
+        x = new Sc(true);
+        x.ev("Fork", R, FORK).dist(40).mark();
+        for (int k = 0; k < 6; k++) x.after(1000).ev(k % 2 == 0 ? "Name" : "Fork", k % 2 == 0 ? U : R, k % 2 == 0 ? NAME : FORK);
+        row("#65 alternation stopped at 40 m, no distance, every 1 s", x, 0, 0, !x.sent(65));
+        // 4. 회전 직후 가까운 다음 지점(10m → 55m): 지난 좌회전 그림은 다음 거리 표본까지만
+        x = new Sc(true);
+        x.ev("Left", L, TURN).dist(300).after(1000).dist(100).after(1000).dist(10).after(500).pass(13, 70).mark();
+        x.ev("Next", U, NAME).after(1500).dist(55).after(1500).dist(52).after(1500).dist(49).after(1500).dist(46);
+        row("passed a turn, next point close (10 m -> 55, 52, 49 m)", x, 1500, 1, !x.sent(13) || x.oldLeft() <= 1500);
+        // 5. 60m → 이름 바뀜 → 70, 67 … 52m
+        x = new Sc(true);
+        x.ev("Left", L, TURN).dist(300).after(1000).dist(60).after(500).pass(13, 70).mark();
+        x.ev("Next", U, NAME).after(1000).dist(70);
+        for (int d = 67; d >= 52; d -= 3) x.after(1000).dist(d);
+        row("passed a turn at 60 m, next distances 70, 67 ... 52 m", x, 1000, 1, true);
+        // 6. 회전 직후 정차(거리가 안 옴)
+        x = new Sc(true);
+        x.ev("Left", L, TURN).dist(300).after(1000).dist(20).after(500).pass(13, 70).mark();
+        x.ev("Next", U, NAME).after(60000);
+        row("passed a turn, then stopped (no distance for 60 s)", x, AaTurns.PEND_WAIT_MS, 1, x.sent(65));
+        // 6b. 붙잡은 뒤 정차(실제 회전 이벤트도 거리도 안 옴): 붙잡기 한도(8초)에서 풀림
+        x = new Sc(true);
+        x.ev("Fork", R, FORK).dist(300).after(1000).ev("Name", U, NAME).after(500).dist(300).pass(25, 173).mark();
+        x.after(60000);
+        row("held, then stopped (nothing for 60 s): the 8 s hold limit", x, AaTurns.NAME_HOLD_MS, 1, x.sent(65) && !x.t.nameHeld);
+        // 7. 같은 방향 연속 갈림길, 거리 먼저: B의 번갈아도 막힘
+        x = new Sc(true);
+        x.ev("Fork A", R, FORK).dist(300).after(1000).dist(10).after(500).pass(25).mark();
+        x.ev("Fork B", R, FORK).after(100).dist(900);
+        m = 900;
+        for (int k = 0; k < 6; k++) x.after(1500).ev(k % 2 == 0 ? "Name" : "Fork B", k % 2 == 0 ? U : R, k % 2 == 0 ? NAME : FORK).after(500).dist(m -= 30);
+        row("consecutive same-side forks, B's distance first, then B alternates", x, 100, 1, !x.sent(65));
+        // 8. 같은 방향 연속 갈림길, 이름 먼저(B 이벤트 → 이름 바뀜 → B의 거리)
+        x = new Sc(true);
+        x.ev("Fork A", R, FORK).dist(300).after(1000).pass(25).mark();
+        x.ev("Fork B", R, FORK).after(300).ev("Name", U, NAME).after(300).dist(900).after(1000).dist(870).after(1000).dist(840);
+        row("consecutive same-side forks, the name change before B's distance", x, 600, 1, !x.sent(65));
+        // 9. 같은 회전의 이름만 A↔B 2초마다, 거리가 옴(300m)
+        x = new Sc(true);
+        x.ev("Road A", R, TURN).dist(300).mark();
+        m = 300;
+        for (int k = 0; k < 10; k++) x.after(2000).ev(k % 2 == 0 ? "Road B" : "Road A", R, TURN).after(10).dist(m -= 5);
+        row("same turn, road name A<->B every 2 s, distances coming (300 m)", x, 0, 0, true);
+        // 10. 같은 회전의 이름만 A↔B 2초마다, 거리가 안 옴(정차 300m)
+        x = new Sc(true);
+        x.ev("Road A", R, TURN).dist(300).mark();
+        for (int k = 0; k < 10; k++) x.after(2000).ev(k % 2 == 0 ? "Road B" : "Road A", R, TURN);
+        x.after(3000);
+        row("same turn, road name A<->B every 2 s, no distance (stopped at 300 m)", x, 0, 0, x.frames.get(x.frames.size() - 1)[1] == 13);
+        // 11. 380m 띠(D와 D+50 사이)에서 이름만 바뀜
+        x = new Sc(true);
+        x.ev("Road A", R, TURN).dist(340).after(1000).dist(380).mark();
+        for (int k = 0; k < 4; k++) x.after(2000).ev(k % 2 == 0 ? "Road B" : "Road A", R, TURN).after(10).dist(382 - k);
+        row("same turn, road name changes in the 380 m hysteresis band", x, 0, 0, true);
+        // 12. 이름만 다른 같은 방향 다음 회전, 앞 회전을 15m에서 지나고 거리가 안 옴
+        x = new Sc(true);
+        x.ev("Road A", R, TURN).dist(200).after(1000).dist(15).after(500).pass(13).mark();
+        x.ev("Road B", R, TURN).after(10000);
+        row("next same-side turn with another name after 15 m, no distance", x, AaTurns.PEND_WAIT_MS, 1, !x.t.samePend);
+        // 13. 재탐색 시작·끝(판단을 기다리는 중)
+        x = new Sc(true);
+        x.ev("Fork", R, FORK).dist(300).after(500).ev("Name", U, NAME).after(300).pass(25).mark();
+        x.st(3).after(3000).st(1).after(3000);
+        row("rerouting starts and ends while a name change waits", x, 300, 2, !x.sent(25) && x.h.pending.isEmpty());
+        // 13b. 재탐색 중에 이름만 다른 같은 꼴 이벤트(판단 기다림)가 생긴 채 재탐색이 끝남: 옛 거리로 바로 보내지 않음(L1)
+        x = new Sc(true);
+        x.ev("Road A", R, TURN).dist(300).after(10).st(3).ev("Road A", R, TURN).dist(320).ev("Road B", R, TURN).after(10).mark();
+        boolean waiting = x.t.samePend;
+        x.st(1);
+        int framesAtEnd = x.frames.size();
+        x.after(100).dist(900);
+        row("rerouting ends while a same-shape event waits: nothing with the old distance", x, 0, 1,
+                waiting && framesAtEnd == x.frames.size() - 1 && !x.sent(13));
+        // 14. 안내 끝(판단을 기다리는 중)
+        x = new Sc(true);
+        x.ev("Fork", R, FORK).dist(300).after(500).ev("Name", U, NAME).after(300).pass(25).mark();
+        x.st(2).after(5000);
+        row("guidance ends while a name change waits", x, 0, 1, x.h.pending.isEmpty() && x.frames.get(x.frames.size() - 1)[1] == 8);
+        // 15. end() 단독: 안내 시작 전 기한이 걸린 채(이름만 다른 같은 꼴 이벤트)
+        Sc y = new Sc(true);
+        y.st(2);
+        y.ev("Road A", R, TURN).dist(300).ev("Road B", R, TURN).mark();
+        boolean armed = y.h.pending.contains(y.t.nameDue);
+        y.t.end();
+        y.stamp();
+        y.after(5000);
+        row("end() alone, before guidance, with the timer armed", y, 0, 0, armed && y.h.pending.isEmpty());
+        // 16. 연결 끝 뒤 기한: 아무것도 나가지 않음
+        x = new Sc(true);
+        x.ev("Fork", R, FORK).dist(300).after(500).ev("Name", U, NAME).mark();
+        x.t.end();
+        x.stamp();
+        int after = x.frames.size();
+        x.after(10000);
+        row("the timer after the connection end", x, 0, 1, x.frames.size() == after && x.h.pending.isEmpty());
+        // 17. 설정 aa_name_hold 끔: 이름 바뀜은 바로(2.4.0), 이름만 바뀌면 거리는 유지
+        x = new Sc(false);
+        x.ev("Fork", R, FORK).dist(300).mark();
+        for (int k = 0; k < 4; k++) x.after(2000).ev(k % 2 == 0 ? "Name" : "Fork", k % 2 == 0 ? U : R, k % 2 == 0 ? NAME : FORK).after(10).dist(290 - k * 10);
+        row("setting aa_name_hold off: #65 alternation flickers as 2.4.0", x, 0, 8, x.sent(65) && x.h.pending.isEmpty());
+        x = new Sc(false);
+        x.ev("Road A", R, TURN).dist(300).mark();
+        for (int k = 0; k < 4; k++) x.after(2000).ev(k % 2 == 0 ? "Road B" : "Road A", R, TURN).after(10).dist(295 - k * 5);
+        row("setting off: a road-name-only change still keeps the distance (no far)", x, 0, 0, true);
+
+        // L3: Handler가 직접 돌리는 타이머(nameDue, tick) 안에서 예외가 나도 밖으로 나가지 않는다(나가면 GPM이 죽음)
+        x = new Sc(true);
+        final List<String> lines = new java.util.ArrayList<String>();
+        x.t.log = new AaTurns.Sink() {
+            @Override
+            public void line(String s2) {
+                lines.add(s2);
+            }
+        };
+        x.ev("Fork", R, FORK).dist(300).after(500).ev("Name", U, NAME);
+        boolean threw = false;
+        try {
+            java.lang.reflect.Field f = AaTurns.class.getDeclaredField("cluster");
+            f.setAccessible(true);
+            f.set(x.t, null);   // 계기판 호출에서 NullPointerException이 나게
+            x.after(AaTurns.PEND_WAIT_MS + 10);
+            x.t.tick.run();
+            x.t.tripMeters = 100;
+            x.t.tick.run();
+        } catch (Throwable e) {
+            threw = true;
+        }
+        check("L3: an exception inside nameDue/tick stays inside (no crash), logged once with its type only",
+                !threw && lines.contains("AA: timer error NullPointerException") && java.util.Collections.frequency(lines, "AA: timer error NullPointerException") == 1);
+    }
+
     static String last(String prefix) {
         String r = null;
         for (String x : c.calls) if (x.startsWith(prefix)) r = x;
@@ -402,15 +1091,15 @@ public final class AaTurnsTest {
         check("2.3.0 crossroad name: sent again after the car's navigation took over (and the focus came back)", c.calls.contains("road [Road B]"));
         c.calls.clear();
 
-        // 1.7.2: 줄은 곧 회전 여부·D가 바뀔 때도 하나(숫자만): Road A 멀리·곧 회전, Road B 멀리(거리 오기 전)·곧 회전,
-        // 순정에서 돌아온 뒤 Road B 멀리·곧 회전(D는 늘 350m)
+        // 1.7.2: 줄은 곧 회전 여부·D가 바뀔 때도 하나(숫자만): Road A 멀리·곧 회전, 순정에서 돌아온 뒤 Road B 멀리·곧 회전(D는 늘 350m).
+        // 1.7.3 추가(로그 H): 같은 회전에서 이름만 Road A → Road B로 바뀌면 멀리 있음으로 떨어지지 않는다(전에는 멀리·곧 회전 두 줄이 더 있었음)
         check("2.3.0 turn log: numbers only, not repeated for the same values (distance, name, resend)",
-                log.size() == 6 && log.get(5).equals("AA: turn ev 4 side 2 angle -1 -> icon 67 near display 13 bar 40 d 350") && log.get(0).equals("AA: turn ev 4 side 2 angle -1 -> icon 67 far")
+                log.size() == 4 && log.get(3).equals("AA: turn ev 4 side 2 angle -1 -> icon 67 near display 13 bar 40 d 350") && log.get(0).equals("AA: turn ev 4 side 2 angle -1 -> icon 67 far")
                         && log.get(1).equals("AA: turn ev 4 side 2 angle -1 -> icon 67 near display 13 bar 50 d 350"));
         log.clear();
-        int before = t.turnLogs;   // 8 ramps + 6 turn lines
+        int before = t.turnLogs;   // 8 ramps + 4 turn lines
         for (int k = 0; k < 400; k++) t.nextTurn("R", k % 2 == 0 ? RIGHT : LEFT, TURN, k, 0);
-        check("2.3.0 turn log: at most 300 lines in all", before == 14 && log.size() == 300 - before && t.turnLogs == AaTurns.TURN_LOGS_MAX);
+        check("2.3.0 turn log: at most 300 lines in all", before == 12 && log.size() == 300 - before && t.turnLogs == AaTurns.TURN_LOGS_MAX);
         boolean names2 = false;
         for (String x : log) if (x.contains("R ") || x.contains("Road")) names2 = true;
         check("2.3.0 turn log: no road names", !names2);

@@ -140,7 +140,7 @@ final class CpTurns {
     String diagKey, laneDiagKey;
     int diagLogs;
     static final int DIAG_LOGS_MAX = 300;
-    /** 마지막 near() 판정의 이유(진단 줄용): in-d(D 안, 곧 회전), no-dist, stale-dist, type(큰 그림 없는 종류), far */
+    /** 마지막 near() 판정의 이유(진단 줄용): in-d(D 안, 곧 회전), hold(D와 D + NEAR_EXIT_MARGIN 사이에서 곧 회전 유지, 1.7.3), no-dist, stale-dist, type(큰 그림 없는 종류), far */
     String nearWhy = "";
     /** 마지막 near() 판정에 쓴 D(m, 진단 줄용). D를 정하기 전에 판정이 끝났으면 -1 */
     int nearD = -1;
@@ -166,6 +166,10 @@ final class CpTurns {
     /** 지금 회전의 처음 거리(m)와 그 회전(구성요소·번호·종류). 회전이 바뀌었는지 알아보는 데 쓴다 */
     String nearKey;
     int nearFirst;
+    /** 1.7.3(N-3): 이 회전이 곧 회전으로 들어갔다(나올 때는 D + NEAR_EXIT_MARGIN을 넘어야 함). 회전이 바뀌면 풀린다 */
+    boolean nearOn;
+    /** 곧 회전에서 나오는 여유(m). 들어갈 때는 D, 나올 때는 D + 이 값(AA AaTurns와 같음) */
+    static final int NEAR_EXIT_MARGIN = 50;
     /** 마지막으로 보낸 곧 회전 여부(로그용) */
     boolean nearShown;
     /** 경로 탐색 중 표시(9 탐색, 10 재탐색)를 보내는 중이면 그 번호, 아니면 0 */
@@ -847,6 +851,7 @@ final class CpTurns {
             nearWhy = "stale-dist";
             return null;
         }
+        if (newKey) nearOn = false;   // 다른 회전: 히스테리시스는 새로 시작(N-3)
         if (newKey || remain > nearFirst) {
             nearKey = key;
             nearFirst = remain;
@@ -859,8 +864,13 @@ final class CpTurns {
         int d = expressway(x.type) ? D_EXPRESSWAY : D_GENERAL;
         nearD = d;
         nearWhy = "far";
-        if (remain > d) return null;
-        nearWhy = "in-d";
+        // 1.7.3(N-3): 들어갈 때는 D, 이미 곧 회전이면 D + NEAR_EXIT_MARGIN을 넘어야 나간다(#67 경계에서 그림이 왔다갔다함)
+        if (remain > (nearOn ? d + NEAR_EXIT_MARGIN : d)) {
+            nearOn = false;
+            return null;
+        }
+        nearWhy = remain > d ? "hold" : "in-d";
+        nearOn = true;
         int bits = disp[1] < 0 ? 0 : sideBits(x.angles, disp[1]);
         return new int[] { disp[0], bits, disp[2], bar(remain, d), d };
     }

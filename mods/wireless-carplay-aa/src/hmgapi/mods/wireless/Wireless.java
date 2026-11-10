@@ -11,6 +11,8 @@ package hmgapi.mods.wireless;
 //   1.5초·5초 뒤에 다시 보낸다(StockReplay, 순정 호출이 없으면 백업 타이머 한 번). 우리 지우기가 순정 값보다 늦게
 //   도착하거나 순정이 값을 바꾸지 않아도 계기판이 빈 채로 남지 않게 한다.
 // 1.7.2 차-5 뒤 진단: 디버그 로그가 켜졌으면 DiPO 쪽(Dipo.debug → CpTurns)에 알려 곧 회전 판단 진단 줄을 남기게 한다.
+// Korea Projection 1.7.3(2026-11-10, 모드 2.4.1, 계획 A-1): GPM에서 PP가 뜬 뒤(runningPP) 버려진 무선 AA 준비(1)를
+//   한 번 더 보낸다(AaReady). 설정 aa_ready_resend(기본 켬), 패키지 신호 sys.kp.aa_ap=1일 때만.
 
 import android.content.ComponentName;
 import android.content.Context;
@@ -93,6 +95,8 @@ public final class Wireless extends ModEntry {
         if (BTSETTINGS.equals(app.packageName) && mod.settingBoolean("menu", true) && MENU_DECLARED) phoneProjectionMenu(mod, app);
         // 한국 차 빌드: 패키지가 띄운 AP를 무선 안드로이드 오토가 쓰게 한다(AaWifi, 켜기 속성이 있을 때만 동작)
         if ((GPM.equals(app.packageName) || AaWifi.PHONEPROJ.equals(app.packageName)) && mod.settingBoolean("aa_ap", true)) AaWifi.hook(mod, app);
+        // 한국 차 빌드 1.7.3(A-1): PP가 늦게 떠서 버려진 무선 AA 준비(1)를 PP가 뜬 뒤 다시 보낸다
+        if (GPM.equals(app.packageName)) aaReady(mod, app, mod.settingBoolean("aa_ready_resend", true));
         if (DIPO.equals(app.packageName) && (mod.settingBoolean("tbt", true) || mod.settingBoolean("bridge", true) || mod.settingBoolean("audio", true))) dipo(mod, app);
     }
 
@@ -363,6 +367,8 @@ public final class Wireless extends ModEntry {
             }
         });
         final java.util.Map<Object, AaTurns> turns = new java.util.WeakHashMap<Object, AaTurns>();
+        // 1.7.3 A-2 규칙을 쓸지(설정 aa_name_hold, 기본 켬). 끄면 이름 바뀜은 2.4.0처럼 바로 보인다
+        final boolean nameHold = mod.settingBoolean("aa_name_hold", true);
         final android.os.HandlerThread thread = new android.os.HandlerThread("hmgapi-aa-tbt");
         thread.start();
         final android.os.Handler handler = new android.os.Handler(thread.getLooper());
@@ -382,6 +388,7 @@ public final class Wireless extends ModEntry {
                                     hmgapi.hook.Cluster c = hmgapi.hook.Cluster.of(app.context);
                                     if (c == null) return;
                                     turns.put(receiver, t = new AaTurns(app.context, c, handler));
+                                    t.nameHold = nameHold;
                                     t.log = new AaTurns.Sink() {
                                         @Override
                                         public void line(String s) {
@@ -453,6 +460,81 @@ public final class Wireless extends ModEntry {
             @Override
             protected void afterHookedMethod(Param p) {}
         });
+    }
+
+    /** AaReady 훅이 이 프로세스에 걸렸다(한 번만) */
+    private static boolean aaReadyHooked;
+
+    /**
+     * 1.7.3(A-1): GPM의 GalReceiverService$PPActionListener.runningPP() 뒤에, 패키지 신호(sys.kp.aa_ap=1, AaWifi.on)가
+     * 있으면 0.5초 뒤 GPM 메인 스레드에서 한 번 AaReady.resend를 부른다(PPService의 binder 호출을 붙잡지 않게, GPM의 다른
+     * 처리와 같은 스레드에서). 반복 타이머는 없다(runningPP마다 한 번). 설정 aa_ready_resend가 꺼져 있으면 훅을 걸지 않는다
+     * (AaReady.install). HMG-API 지도에 없는 메서드라 Hooks로 직접 건다. 없으면 한 줄 남기고 넘어간다.
+     * 리뷰 반영: GalReceiverService.requestWLDeviceReadyStatusUpdate 앞에서 기기별 준비(1) 시각을 적어(AaReady.noteReady),
+     * PP가 뜬 뒤 순정이 이미 보낸 기기는 다시 보내지 않는다. 이 훅을 못 걸면 전처럼 모두 보낸다.
+     */
+    private static synchronized void aaReady(final ModContext mod, final LoadedApp app, boolean setting) {
+        if (aaReadyHooked) return;
+        aaReadyHooked = true;
+        try {
+            AaReady.install(setting, new AaReady.Installer() {
+                @Override
+                public void install() {
+                    aaReadyHooks(mod, app);
+                }
+            });
+        } catch (Throwable t) {
+            mod.log(AaReady.LINE + "훅 없음 (" + t.getClass().getSimpleName() + ")");
+        }
+    }
+
+    /** aaReady의 두 훅(설정이 켜졌을 때만 불림) */
+    private static void aaReadyHooks(final ModContext mod, final LoadedApp app) {
+        final AaReady.Log log = new AaReady.Log() {
+            @Override
+            public void line(String s) {
+                mod.log(s);
+            }
+        };
+        try {
+            Class<?> gal = Class.forName(AaReady.GAL_SERVICE, false, app.classLoader);
+            Hooks.findAndHookMethod(gal, "requestWLDeviceReadyStatusUpdate", "android.phoneprojection.WLDeviceInfo", int.class, new MethodHook() {
+                @Override
+                protected void beforeHookedMethod(Param p) {
+                    AaReady.noteReady(p.args[0], p.args[1], android.os.SystemClock.elapsedRealtime());
+                }
+            });
+        } catch (Throwable t) {
+            mod.log(AaReady.LINE + "준비 시각 훅 없음, 모두 다시 보냄 (" + t.getClass().getSimpleName() + ")");
+        }
+        try {
+            final Class<?> c = Class.forName(AaReady.PP_LISTENER, false, app.classLoader);
+            Hooks.findAndHookMethod(c, "runningPP", new MethodHook() {
+                @Override
+                protected void afterHookedMethod(Param p) {
+                    final Object listener = p.thisObject;
+                    final long since = android.os.SystemClock.elapsedRealtime();
+                    AaReady.onRunningPP(AaWifi.on(mod), new AaReady.Scheduler() {
+                        @Override
+                        public void postDelayed(Runnable r, long ms) {
+                            new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(r, ms);
+                        }
+                    }, new Runnable() {
+                        @Override
+                        public void run() {
+                            try {
+                                AaReady.resend(app.classLoader, listener, log, since, android.os.SystemClock.elapsedRealtime());
+                            } catch (Throwable t) {
+                                mod.log(AaReady.LINE + "못 함 (" + t.getClass().getSimpleName() + ")");
+                            }
+                        }
+                    });
+                }
+            });
+            mod.log("Android Auto: ready resend hook in " + app.processName + " (active only while " + AaWifi.PROP + "=1)");
+        } catch (Throwable t) {
+            mod.log(AaReady.LINE + "훅 없음: GPM 구조가 다름 (" + t.getClass().getSimpleName() + ")");
+        }
     }
 
     private void usbDrives(final ModContext mod, LoadedApp app) {
