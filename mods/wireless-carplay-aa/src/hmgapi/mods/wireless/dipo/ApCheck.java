@@ -14,6 +14,11 @@ package hmgapi.mods.wireless.dipo;
  * (모드 2가 아니어도) 우리 AP가 아니므로 예전처럼 부른다.
  */
 final class ApCheck {
+    /**
+     * Q-1(1.7.4): Wi-Fi 장치 이름을 한 곳에서 정한다(1.8.0 USB 동글 준비). Wireless.WIFI_IF와 같은 값이어야 한다
+     * (DiPO 앱 파트는 클래스 로더가 달라 따로 둔다. tools/dupsame 시험이 두 값을 비교한다). 밖에서 바꾸는 길은 아직 없다
+     */
+    static final String WIFI_IF = "wlan0";
     /** Korea Projection 패키지 hotspot.sh의 AP_IP(우리 hostapd가 wlan0에 거는 주소) */
     static final String OUR_AP_IP = "192.168.43.1";
     /** 패키지가 우리 AP를 확인했을 때 켜는 속성(AaWifi.PROP과 같은 이름) */

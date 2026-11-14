@@ -559,7 +559,7 @@ final class Bridge {
     /** wlan0의 IPv4 주소들(우리 AP 확인용, 로그에 남기지 않음). 읽지 못하면 null */
     static String[] wlanAddrs() {
         try {
-            java.net.NetworkInterface ni = java.net.NetworkInterface.getByName("wlan0");
+            java.net.NetworkInterface ni = java.net.NetworkInterface.getByName(ApCheck.WIFI_IF);
             if (ni == null) return null;
             ArrayList<String> r = new ArrayList<String>();
             for (java.util.Enumeration<java.net.InetAddress> e = ni.getInetAddresses(); e.hasMoreElements();) {

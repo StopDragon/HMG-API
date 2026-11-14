@@ -45,6 +45,14 @@ package hmgapi.mods.wireless.dipo;
 //   (item 10, m)가 D 안이고 큰 그림이 있는 종류면 곧 회전이다. 목적지·경유지·출발·페리, 거리 없음·오래된 거리는 멀리 있음 그대로.
 //   차로 프레임은 받으면 지금처럼 따로 보낸다. 위 M-4 설명의 "차로 안내가 함께 오는 회전만"은 이 수정으로 바뀌었다.
 
+// Korea Projection 1.7.4(2026-11-12, 모드 2.4.2, 소유자 결정 "순정과 똑같이", 계획 D-15 방안 A):
+//   회전 프레임을 순정 DiPO(e/u.a)와 같게 보낸다. 지운 것: 곧 회전 화면(13·31·17·18·25)·옆길 비트·방향·막대,
+//   350m·1050m 경계 여유, 막대 방송(PhoneBarOut), 경로 탐색 9·재탐색 10 표시, 표 밖 입력의 대체 번호(fallbackIcon·
+//   bandedTurn·roundaboutIcon, 빈 칸 8, 출발 1), 교차로·목적지 이름의 10초 묶기와 "곧 회전일 때만 이름", 거리 모름의
+//   거리 오류 -3, 멀리 있음 막대 오류 -1. 좌측통행 회전교차로는 순정 B 계열. 위 옛 수정 기록 가운데 이 항목들은 이제 맞지 않는다.
+//   판단을 기다리며 그대로 둔 것: 각도 없는 좌·우회전 70·67, 출구 각도 남기기, 안내 끝 지우기, 다시 보내기, 출처 앱 바뀜 정리,
+//   HUD 목록·2C·차로·남은 거리·다음 회전 목록(drafts/1.7.4-work/mod.md)
+
 import android.content.Context;
 import android.text.format.DateFormat;
 
@@ -99,6 +107,9 @@ final class CpTurns {
     long sourceWaitAt;
     static final long SOURCE_WAIT_MS = 10000L;
     static final int SOURCE_KEEP = 4;
+    /** T-5 ①(1.7.4): 첫 출처 이름 디버그 줄 수(프로세스당) */
+    int sourceLogs;
+    static final int SOURCE_LOGS_MAX = 20;
     /** last HUD list sent (type, next, road), so an unchanged one isn't resent */
     int hudType, hudNext, hudThird;
     String hudRoad;
@@ -123,32 +134,17 @@ final class CpTurns {
     static final long REFRESH_MAX_MS = 300000L;
     /** run (on this thread) when guidance becomes active, so the caller starts calling refresh() */
     Runnable onActive;
-    /** the crossroad name last sent and when; resent only when it changes or after CROSSROAD_MS */
-    String crossroad;
-    long crossroadAt;
-    static final long CROSSROAD_MS = 10000L;
     /** maneuver log: the last values logged and how many lines so far (numbers only, no names) */
     String maneuverKey;
     int maneuverLogs;
     static final int MANEUVER_LOGS_MAX = 300;
-    /**
-     * 진단 줄(1.7.2 차-5 뒤, 디버그 로그가 켜졌을 때만): 곧 회전 화면을 쓸지 정한 근거(받은 차로 수, 남은 거리 m, D, 판정과
-     * 그 이유)와 보낸 updateTBTInfo 인자. 숫자만 남기고 이름은 남기지 않는다. 거리만 바뀐 줄은 남기지 않고 다른 값이 바뀔 때
-     * 그때의 거리를 함께 남긴다. Dipo가 debug를 켠다(Wireless.debug, 패키지의 디버그 파일).
-     */
+    /** 진단 줄(디버그 로그가 켜졌을 때만): 차로 안내 번호·차로 수. 숫자만. Dipo가 debug를 켠다(Wireless.debug, 패키지의 디버그 파일) */
     boolean debug;
-    String diagKey, laneDiagKey;
+    String laneDiagKey;
     int diagLogs;
     static final int DIAG_LOGS_MAX = 300;
-    /** 마지막 near() 판정의 이유(진단 줄용): in-d(D 안, 곧 회전), hold(D와 D + NEAR_EXIT_MARGIN 사이에서 곧 회전 유지, 1.7.3), no-dist, stale-dist, type(큰 그림 없는 종류), far */
-    String nearWhy = "";
-    /** 마지막 near() 판정에 쓴 D(m, 진단 줄용). D를 정하기 전에 판정이 끝났으면 -1 */
-    int nearD = -1;
     /** the time (ms since boot: the wall clock jumps when GPS or the network sets it); tests set clock */
     long clock = -1L;
-    /** the destination name last sent (state 6) and when, as the crossroad name */
-    String destination;
-    long destinationAt;
     /**
      * 계기판에 회전이나 목적지 이름을 보낸 뒤 아직 지우지 않았는지(M-2). 폰은 안내가 없을 때도 상태 0을
      * 여러 번 보내므로, 지우기(clearTurn)는 보낸 것이 있을 때 한 번만 한다.
@@ -158,52 +154,21 @@ final class CpTurns {
     boolean hudShown;
     /** 거리를 몰라 HUD 첫 칸을 비워 보냈다(같은 값을 되풀이하지 않게, 거리를 알면 풀림) */
     boolean hudDistBlank;
-    /**
-     * 차로 안내(LaneGuidance) 번호 -> 차로 수(M-4). 회전이 링크한 차로 안내(item 12)에 차로가 있어야 곧 회전 화면을 쓴다.
-     * 순정은 교차로 확대도·표지판 안내가 있을 때만 곧 회전 화면을 쓰고, 폰은 그 정보를 주지 않으므로 가장 가까운 차로 안내로 대신한다.
-     */
-    final LinkedHashMap<Integer, Integer> laneCounts = new LinkedHashMap<Integer, Integer>();
-    /** 지금 회전의 처음 거리(m)와 그 회전(구성요소·번호·종류). 회전이 바뀌었는지 알아보는 데 쓴다 */
-    String nearKey;
-    int nearFirst;
-    /** 1.7.3(N-3): 이 회전이 곧 회전으로 들어갔다(나올 때는 D + NEAR_EXIT_MARGIN을 넘어야 함). 회전이 바뀌면 풀린다 */
-    boolean nearOn;
-    /** 곧 회전에서 나오는 여유(m). 들어갈 때는 D, 나올 때는 D + 이 값(AA AaTurns와 같음) */
-    static final int NEAR_EXIT_MARGIN = 50;
-    /** 마지막으로 보낸 곧 회전 여부(로그용) */
-    boolean nearShown;
-    /** 경로 탐색 중 표시(9 탐색, 10 재탐색)를 보내는 중이면 그 번호, 아니면 0 */
-    int searching;
 
     /**
-     * 순정 무안내 회전 값(M-2). 순정 엔진은 경로가 없으면 표시 8(안내 없음)을 보내고, 지울 때는 거리·막대를
-     * 무효로 둔다(FINDINGS "엔진 2차 분석", drafts/stock-re/navi-engine-cluster.md 5장). NavigationCluster
-     * 범위: distanceErr -3..0, scale 0..4·15, barErr -2..0(-1 → 막대 15). 방향은 0..360만 받으므로 0이다.
+     * 안내 끝 지우기 값(M-2, 1.7.4에서도 그대로: 순정 DiPO는 운영 상태 2로 계기판을 넘기지만 우리는 운영 상태를
+     * 보내지 않으므로 이 지우기가 그 대신이다). 표시 8, 거리 무효 -3, 단위 15, 막대 무효(barErr -1).
      */
-    static final int CLEAR_ICON = 8, CLEAR_DIST_ERR = -3, CLEAR_UNIT = 15;
+    static final int CLEAR_ICON = 8, CLEAR_DIST_ERR = -3, CLEAR_UNIT = 15, CLEAR_BAR_ERR = -1;
     /**
      * 남은 거리·시간(updateTBTSubInfo) 지우기 값: 순정 엔진은 0xFF·거리 0xFFFF를 넣고, 서비스가 범위 밖 값을
      * 시간 종류·형식 3, 단위 15로 바꾼다. 도착 지점 종류는 9인자판 기본값 15(없음)를 쓴다.
      */
     static final int CLEAR_TIME = 3, CLEAR_EST_POINT = 15;
-    /**
-     * 막대 무효(M-3): barErr -1이면 계기판 막대 칸이 15(무효)가 된다. 순정 엔진은 "곧 회전"(교차로 확대도·
-     * 표지판 안내 중)일 때만 막대 1~10을 넣고, 그 밖("멀리 있음")은 막대 15·방향 0xFF·combi 15·옆길 0을 넣는다.
-     * 1.7.2(M-4): 차로 안내가 있는 회전이 D 안이면 곧 회전 값(near)을 보내고, 그 밖은 이 멀리 있음 값이다.
-     */
-    static final int BAR_FAR = 0, BAR_FAR_ERR = -1;
     /** 안내 끝 2C 한 칸: 단위 15, 소수 15, 정수 65535(순정 setClusterClearData) */
     static final int HUD_CLEAR_UNIT = 15, HUD_CLEAR_TENTHS = 15;
-    /**
-     * 경로 탐색 중 표시 번호(순정 엔진 SetClusterCalculate 9, 차-3에서 9 "경로 탐색 중입니다"·10 "경로 재탐색 중입니다" 확인).
-     * iAP2 RouteGuidanceState: 0 경로 없음, 1 경로 있음, 2 도착, 3 불러오는 중(경로 계산), 4 위치 찾는 중, 5 재탐색,
-     * 6 경로로 가는 중(iAP2 규격 값. 순정 DiPO e/u는 0이면 보내지 않고 6이면 목적지 이름을 보낼 뿐 3·5를 따로 다루지 않음)
-     */
-    static final int STATE_LOADING = 3, STATE_REROUTING = 5, DISPLAY_SEARCH = 9, DISPLAY_RESEARCH = 10;
-    /** 곧 회전 화면을 쓰기 시작하는 거리 D(m): 순정 교차로 확대 안내 단계 5 + MarginalDist 50(차-1 설정 파일) */
-    static final int D_GENERAL = 350, D_EXPRESSWAY = 1050;
-    /** 곧 회전 표시 번호(순정 SetCase*): 회전 지점 13, 유턴 31, 고속도로 오른쪽·왼쪽 출구 17·18, Y자 갈림 25 */
-    static final int NEAR_TURN = 13, NEAR_UTURN = 31, NEAR_EXIT_RIGHT = 17, NEAR_EXIT_LEFT = 18, NEAR_FORK = 25;
+    /** iAP2 RouteGuidanceState 6: 목적지 이름을 보내는 상태(순정 DiPO e/u.a의 c.a() == 6) */
+    static final int STATE_DESTINATION = 6;
 
     long now() {
         return clock >= 0L ? clock : android.os.SystemClock.elapsedRealtime();
@@ -214,9 +179,6 @@ final class CpTurns {
         this.cluster = cluster;
         this.restart = restart;
     }
-
-    /** 곧 회전 막대를 순정 내비 프로세스로 알린다(순정 단속 정보 프레임의 막대 칸, 1.7.2 시험판 3) */
-    final PhoneBarOut barOut = new PhoneBarOut();
 
     /** RouteGuidanceUpdate (DiPO e/u.c) */
     void routeGuidance(Iap2NotiMsg msg) {
@@ -350,7 +312,6 @@ final class CpTurns {
             f[k * 3 + 20] = (byte) b[k];
             f[k * 3 + 21] = (byte) c[k];
         }
-        if (index >= 0) laneCounts.put(index, n);
         cluster.laneInfo(f);
         hudShown = true;
         if (debug) {
@@ -566,10 +527,6 @@ final class CpTurns {
     void stop() {
         activeId = null;
         sourceWaitAt = 0L;
-        searching = 0;
-        nearKey = null;
-        // 새 경로는 차로 안내 번호를 처음부터 다시 쓴다: 옛 경로의 차로 수를 남기지 않는다(리뷰 3)
-        laneCounts.clear();
         clearTurn();
         hudBlank();
     }
@@ -579,13 +536,11 @@ final class CpTurns {
      * "바뀔 때만" 보내므로 폰의 마지막 회전이 계기판에 남는다. 보낸 것이 없으면 아무것도 하지 않는다.
      */
     void clearTurn() {
-        // 막대 칸은 순정 값으로 되돌린다(보낸 회전이 없어도 알린다: 바뀐 것이 없으면 보내지 않음)
-        barOut.send(context, PhoneBarOut.NONE, now());
         if (!shown) return;
         shown = false;
         // 진단(1.7.2 베타 2, #61·#123 "안내를 끝내도 잠시 남음"): 지운 때와 폰의 마지막 갱신 뒤 지난 시간(숫자만)
         Dipo.log("CarPlay: turn-by-turn cleared, " + (now() - phoneAt) / 1000L + " s after the phone's last update");
-        cluster.tbtInfo(CLEAR_ICON, 0, 0f, 0f, CLEAR_DIST_ERR, 0, CLEAR_UNIT, 0, BAR_FAR_ERR);
+        cluster.tbtInfo(CLEAR_ICON, 0, 0f, 0f, CLEAR_DIST_ERR, 0, CLEAR_UNIT, 0, CLEAR_BAR_ERR);
         // 남은 거리·도착 시각도 순정 무효 값으로 지운다(리뷰 6, AA release와 같은 값)
         cluster.tbtSubInfo(0f, CLEAR_DIST_ERR, CLEAR_UNIT, 0, 0, CLEAR_TIME, CLEAR_TIME, 0f, -1, CLEAR_EST_POINT);
         cluster.crossroadName("");
@@ -610,7 +565,6 @@ final class CpTurns {
         if (t - phoneAt >= REFRESH_MAX_MS) {
             Dipo.log("CarPlay: no route guidance from the phone for " + (t - phoneAt) / 1000L + " s, turn-by-turn not resent any more");
             activeId = null;
-            barOut.send(context, PhoneBarOut.NONE, t);
             return;
         }
         if (lastHud != null && t - hudAt >= HUD_RESEND_MS) {
@@ -629,9 +583,6 @@ final class CpTurns {
     void reset() {
         activeId = null;
         sourceWaitAt = 0L;
-        laneCounts.clear();
-        nearKey = null;
-        searching = 0;
         for (LinkedHashMap<Integer, Maneuver> m : maneuvers.values()) {
             if (m != null) m.clear();
         }
@@ -652,6 +603,12 @@ final class CpTurns {
             if (s == null || s.length() == 0) continue;
             String was = source;
             source = s;
+            // T-5 ①(1.7.4): 디버그 로그가 켜졌을 때만 어느 지도 앱이 회전을 보내는지(출처 이름만, 앱 이름이다) 남긴다.
+            // 출처가 바뀐 줄(아래)은 2.4.1부터 늘 남는다. 프로세스당 SOURCE_LOGS_MAX 줄까지
+            if (was == null && debug && sourceLogs < SOURCE_LOGS_MAX) {
+                sourceLogs++;
+                Dipo.log("CarPlay: route guidance source " + s + " (debug)");
+            }
             long t = now();
             Long seen = recentSources.remove(s);
             recentSources.put(s, t);
@@ -662,12 +619,10 @@ final class CpTurns {
                 // 다만 실제로 다른 앱에서 돌아온 것일 수도 있어(리뷰 1) 받아 둔 회전·상태는 비우고 폰에게 다시 보내 달라고 한다.
                 // 화면은 폰이 다시 보낼 때까지 마지막 그림을 유지한다.
                 Dipo.log("CarPlay: route guidance source name back to one seen " + (t - seen) / 1000L + " s ago, display kept, data asked again");
-                // 안내 상태(updates)는 남긴다: 비우면 상태 0이 되어 바로 "안내 끝"으로 지워진다. 회전·차로·곧 회전 기준만 비운다
+                // 안내 상태(updates)는 남긴다: 비우면 상태 0이 되어 바로 "안내 끝"으로 지워진다. 받아 둔 회전만 비운다
                 for (LinkedHashMap<Integer, Maneuver> m : maneuvers.values()) {
                     if (m != null) m.clear();
                 }
-                laneCounts.clear();
-                nearKey = null;
                 // 옛 HUD 목록은 다시 보내지 않는다. 폰이 SOURCE_WAIT_MS 안에 회전을 다시 주지 않으면 turn()이 지운다(2차 리뷰 1)
                 lastHud = null;
                 sourceWaitAt = t;
@@ -676,49 +631,45 @@ final class CpTurns {
             }
             Dipo.log("CarPlay: route guidance source changed from " + was + " to " + s + ", clearing turn-by-turn");
             reset();
-            // 앞 앱의 막대를 남기지 않는다(리뷰 7)
-            barOut.send(context, PhoneBarOut.NONE, now());
             hudBlank();
             if (restart != null) new Thread(restart, "hmgapi-cp-rg-restart").start();
             return;
         }
     }
 
-    /** one component's update to the cluster (DiPO e/u.a(Integer, Object), with the build's changes) */
+    /**
+     * one component's update to the cluster: 순정 DiPO e/u.a(Integer, Object)와 같게 보낸다(1.7.4, 소유자 결정 2026-11-12
+     * "순정과 똑같이"). 순정이 하는 일:
+     *   - 상태 6이면 목적지 이름을 갱신마다 보낸다
+     *   - 현재 회전 목록의 첫 회전이 있으면 그 회전의 AfterManeuverRoadName을 교차로 이름으로 갱신마다 보낸다(멀리 있어도)
+     *   - 순정 표(exactIcon)에 맞는 아이콘이 있을 때만 updateTBTInfo(아이콘, 0, 0, 거리, 0, 0, 단위, 0, 0)를 보낸다.
+     *     표에 없으면 보내지 않는다(앞 화살표·거리가 계기판에 남는다). 거리 문자열이 비었거나 숫자가 아니면 0이다
+     *   - 경로 상태 3(경로 계산)·5(재탐색)를 따로 다루지 않는다
+     * 순정에 없고 판단을 기다리는 것(1.7.4 mod.md "판단 필요")은 지금 동작 그대로 둔다: 상태 0·연결 끝 지우기(clearTurn),
+     * 다시 보내기(refresh), 출처 앱 바뀜 정리(sourceCheck), HUD 목록·2C·차로·남은 거리·다음 회전(sendHud 등).
+     */
     void turn(Integer id, Update u) {
         if (id < 0 || u == null) return;
         if (u.state == 0) {
             stop();
             return;
         }
-        if (u.state == STATE_LOADING || u.state == STATE_REROUTING) {
-            routeSearch(id, u.state == STATE_LOADING ? DISPLAY_SEARCH : DISPLAY_RESEARCH);
-            return;
-        }
-        if (searching != 0) {
-            // 탐색이 끝났다: 아래에서 보통 회전 표시를 다시 보낸다(HUD 목록은 지웠으므로 다시 나간다)
-            Dipo.log("CarPlay: route search " + searching + " over, state " + u.state);
-            searching = 0;
-        }
         int[] list = u.list == null ? null : u.list.clone();
         float dist = 0f;
-        // 거리를 모르면(빈 문자열·숫자 아님) 0 대신 거리 무효로 보낸다(1.7.2 베타 2, #123: 경로 시작 때 0.0이 보임)
+        // 순정: 빈 문자열·숫자 아님·NaN·무한이면 0(거리 오류 칸은 늘 0)
         boolean distKnown = false;
         if (u.nextStr != null && !u.nextStr.equals("")) {
             try {
                 dist = Float.parseFloat(u.nextStr);
-                distKnown = !(Float.isNaN(dist) || Float.isInfinite(dist) || dist < 0f);
+                distKnown = !(Float.isNaN(dist) || Float.isInfinite(dist));
                 if (!distKnown) dist = 0f;
             } catch (NumberFormatException e) {
                 dist = 0f;
             }
         }
         long t = now();
-        String dest = u.destination == null ? "" : u.destination;
-        if (u.state == 6 && (!dest.equals(destination) || t - destinationAt >= CROSSROAD_MS)) {
+        if (u.state == STATE_DESTINATION) {
             cluster.destinationName(0, u.destination);
-            destination = dest;
-            destinationAt = t;
             shown = true;
         }
         LinkedHashMap<Integer, Maneuver> m = maneuvers.get(id);
@@ -742,401 +693,40 @@ final class CpTurns {
             case 4: unit = Cluster.UNIT_FT; break;
             default: unit = Cluster.UNIT_M; break;
         }
-        int icon = icon(x.type, x.side, x.junction, x.exit, u.state);
-        // 출발(종류 11 StartRoute, 18 StartRouteWithUTurn)의 0은 "아직 거리 없음"이다: 순정 경로 계산 화면처럼 거리 무효로 둔다
-        if ((x.type == 11 || x.type == 18) && dist == 0f) distKnown = false;
-        int distErr = distKnown ? 0 : CLEAR_DIST_ERR;
-        // StartRoute has no direction: clear the previous app's HUD arrow (upstream 83eb4ef;
-        // once, so refresh() doesn't clear it again every second)
-        if (x.type == 11 && icon == 1 && hudType != -1) hudBlank();
-        String how = icon == 0 ? null : exactIcon(x.type, x.side, x.junction, x.exit, u.state) != 0 ? "exact" : "band";
-        if (icon == 0) {
-            icon = fallbackIcon(x.type, x.side, x.junction, x.exit);
-            how = icon == NO_ICON ? "blank" : x.exit != 0 ? "angle" : "type";
-        }
-        logManeuver(x, u.state, icon, how);
+        int icon = exactIcon(x.type, x.side, x.junction, x.exit, u.state);
+        // HUD 거리: 모르는 거리면 0 대신 첫 칸을 비운다(#123, 소유자 결정 2로 HUD는 계속 전달)
+        boolean hudDistKnown = distKnown && dist >= 0f;
+        logManeuver(x, u.state, icon, icon != 0 ? "stock" : "not in the stock table, not sent");
         boolean was = activeId != null;
         activeId = id;
         lastSendAt = t;
         if (!was && onActive != null) onActive.run();
-        // 곧 회전 화면(M-4): 차로 안내가 있는 회전이 D 안이면 순정 근거리 값, 아니면 멀리 있음 값(막대 무효, M-3)
-        int[] near = near(id, u, x, icon);
-        if ((near != null) != nearShown) {
-            nearShown = near != null;
-            if (maneuverLogs < MANEUVER_LOGS_MAX) {
-                maneuverLogs++;
-                Dipo.log("CarPlay: " + (near != null ? "near layout display " + near[0] + " bar " + near[3] + " d " + near[4] : "far layout"));
-            }
-        }
-        // 도로 이름은 곧 회전일 때만(순정 sendTurnNameData: 멀리 있으면 빈 이름)
-        String road = near == null || x.afterRoad == null ? "" : x.afterRoad;
-        if (!road.equals(crossroad) || t - crossroadAt >= CROSSROAD_MS) {
-            cluster.crossroadName(road);
-            crossroad = road;
-            crossroadAt = t;
-        }
-        if (near != null) cluster.tbtInfo(near[0], near[1], near[2] * 7.5f, dist, distErr, 0, unit, near[3], 0);
-        else cluster.tbtInfo(icon, 0, 0f, dist, distErr, 0, unit, BAR_FAR, BAR_FAR_ERR);
-        // 순정처럼 단속 정보 프레임의 막대 칸에도 같은 값(멀리 있으면 0)
-        barOut.send(context, near != null ? near[3] : 0, t);
-        if (debug) {
-            // 진단 줄이 실패해도 회전 보내기는 그대로 이어 간다
-            try {
-                diagTurn(list[0], x, u, near, icon, dist, unit);
-            } catch (Throwable e) {
-                // 남기지 않는다
-            }
-        }
+        // 순정: 교차로 이름은 갱신마다(멀리 있어도, 표 밖 회전이어도)
+        cluster.crossroadName(x.afterRoad == null ? "" : x.afterRoad);
         shown = true;
-        sendHud(icon, id, u);
-        // HUD 거리도 모르면 0 대신 첫 칸을 비운다(앞 회전의 거리가 남지 않게, 한 번만, 리뷰 2)
-        if (distKnown) {
-            hudDistBlank = false;
-            sendHudDist(dist, unit, id, u);
-        } else if (!hudDistBlank) {
-            hudDistBlank = true;
-            cluster.tbtSubInfo2C(HUD_CLEAR_UNIT, HUD_CLEAR_TENTHS, HUD_NO_POINT, HUD_CLEAR_UNIT, HUD_CLEAR_TENTHS, HUD_NO_POINT,
-                    HUD_CLEAR_UNIT, HUD_CLEAR_TENTHS, HUD_NO_POINT);
+        // 표 밖 회전(순정은 회전 프레임을 보내지 않아 앞 화살표·거리가 남는다): HUD 목록·HUD 거리(2C)도 계기판과 함께 멈춘다
+        // (리뷰 반영 2026-11-12, 계기판과 HUD가 서로 다른 회전을 보이지 않게). refresh는 마지막으로 보낸 HUD 목록을 그대로 다시 보낸다.
+        // 출발(11·18)도 표 밖이라 여기서 멈춘다(2.4.1의 "출발이면 앞 앱 HUD 지우기"는 없어짐)
+        if (icon != 0) {
+            cluster.tbtInfo(icon, 0, 0f, dist, 0, 0, unit, 0, 0);
+            // HUD 목록·2C는 소유자 결정 2(폰 정보 계속 전달)
+            sendHud(icon, id, u);
+            if (hudDistKnown) {
+                hudDistBlank = false;
+                sendHudDist(dist, unit, id, u);
+            } else if (!hudDistBlank) {
+                hudDistBlank = true;
+                cluster.tbtSubInfo2C(HUD_CLEAR_UNIT, HUD_CLEAR_TENTHS, HUD_NO_POINT, HUD_CLEAR_UNIT, HUD_CLEAR_TENTHS, HUD_NO_POINT,
+                        HUD_CLEAR_UNIT, HUD_CLEAR_TENTHS, HUD_NO_POINT);
+            }
         }
+        // 남은 거리·도착 시각·다음 회전 목록은 폰 값 그대로(표 밖 회전이어도)
         sendTrip(u);
         sendAhead(id, u);
     }
 
-    /**
-     * 경로 탐색 중(9)·재탐색(10)(순정 SetClusterCalculate): 방향·옆길·거리 무효, 막대 0으로 바로 보낸다. 처음 들어올 때는
-     * 순정의 강제 지우기(setClusterClearData)처럼 도로 이름을 비우고 2C·HUD 목록을 지운다. refresh가 이 표시를 다시 보낸다.
-     */
-    void routeSearch(Integer id, int display) {
-        long t = now();
-        boolean was = activeId != null;
-        activeId = id;
-        lastSendAt = t;
-        if (!was && onActive != null) onActive.run();
-        cluster.tbtInfo(display, 0, 0f, 0f, CLEAR_DIST_ERR, 0, CLEAR_UNIT, 0, 0);
-        barOut.send(context, 0, t);
-        shown = true;
-        if (searching == display) return;
-        Dipo.log("CarPlay: route search display " + display);
-        searching = display;
-        nearKey = null;
-        laneCounts.clear();
-        nearShown = false;
-        cluster.crossroadName("");
-        crossroad = "";
-        crossroadAt = t;
-        cluster.tbtSubInfo2C(HUD_CLEAR_UNIT, HUD_CLEAR_TENTHS, HUD_NO_POINT, HUD_CLEAR_UNIT, HUD_CLEAR_TENTHS, HUD_NO_POINT,
-                HUD_CLEAR_UNIT, HUD_CLEAR_TENTHS, HUD_NO_POINT);
-        cluster.turnListNew(new byte[] { (byte) 0xF2, 0 });
-        hudShown = true;
-        lastHud = null;
-        hudType = -1;
-        hudNext = 0;
-        hudRoad = null;
-    }
-
-    /**
-     * 곧 회전 화면 값 {표시 번호, 옆길 비트, 방향 칸(7.5도 단위), 막대(10..90), D} 또는 멀리 있음이면 null(M-4·M-5).
-     * 조건(소유자 결정 2026-11-09, 차로 안내 조건 없음): 폰이 다음 회전까지 거리(item 10, m)를 이번 회전에 알려 줌, 곧 회전 화면이 있는 종류(목적지·경유지·출발·페리는 멀리 있음 그대로), 남은 거리 <= D.
-     */
-    int[] near(Integer id, Update u, Maneuver x, int icon) {
-        nearWhy = "no-dist";
-        nearD = -1;
-        if (!u.distNextSeen || u.distNext < 0) return null;
-        int remain = u.distNext;
-        // 이 회전의 처음 거리: 차로가 오기 전부터 센다(폰이 이 회전에 처음 준 거리). 거리가 늘면 새 회전으로 본다
-        String key = id + " " + (u.list == null || u.list.length == 0 ? -1 : u.list[0]) + " " + x.type;
-        boolean newKey = !key.equals(nearKey);
-        // 새 회전인데 이 갱신에 거리(item 10)가 없으면 남은 거리는 앞 회전의 것이다: 판단하지 않는다(리뷰 1)
-        if (newKey && !u.distNextFresh) {
-            nearWhy = "stale-dist";
-            return null;
-        }
-        if (newKey) nearOn = false;   // 다른 회전: 히스테리시스는 새로 시작(N-3)
-        if (newKey || remain > nearFirst) {
-            nearKey = key;
-            nearFirst = remain;
-        }
-        // 소유자 결정 2026-11-09: 차로 안내 조건을 뺐다(카카오내비는 카플레이로 차로 안내를 보내지 않음). D 안의 회전이면 곧 회전
-        int[] disp = nearDisplay(x.type, x.side, x.junction, x.exit, icon);
-        nearWhy = "type";
-        if (disp == null) return null;
-        // D는 순정처럼 고정이다(차 로그 2026-11-09: 순정은 210m에서 처음 본 회전도 막대 60으로 시작한다)
-        int d = expressway(x.type) ? D_EXPRESSWAY : D_GENERAL;
-        nearD = d;
-        nearWhy = "far";
-        // 1.7.3(N-3): 들어갈 때는 D, 이미 곧 회전이면 D + NEAR_EXIT_MARGIN을 넘어야 나간다(#67 경계에서 그림이 왔다갔다함)
-        if (remain > (nearOn ? d + NEAR_EXIT_MARGIN : d)) {
-            nearOn = false;
-            return null;
-        }
-        nearWhy = remain > d ? "hold" : "in-d";
-        nearOn = true;
-        int bits = disp[1] < 0 ? 0 : sideBits(x.angles, disp[1]);
-        return new int[] { disp[0], bits, disp[2], bar(remain, d), d };
-    }
-
-    /**
-     * 진단: 이 회전의 곧 회전 판단 근거와 보낸 updateTBTInfo 인자(숫자만). 남은 거리·표시 거리만 바뀐 줄은 남기지 않는다.
-     * 차로: 회전이 링크한 차로 안내 번호(없으면 -)와 그 번호로 받은 차로 수(못 받았으면 -), 폰이 RouteGuidanceUpdate에 준
-     * 차로 안내 번호·전체 수·보이는지(item 16·17·18). 남은 거리: item 10(m, 받은 적 없으면 -), 이번 갱신에 왔는지.
-     * D: 이 회전의 D(350m 또는 1050m). 판정 이유는 nearWhy.
-     * 곧 회전일 때 막대가 한 칸 줄 때마다(회전당 많아야 10번) 줄이 남는다: 차에서 막대가 줄어드는지 보려고 일부러 둔다.
-     */
-    void diagTurn(int index, Maneuver x, Update u, int[] near, int icon, float dist, int unit) {
-        Integer lanes = x.hasLane ? laneCounts.get(x.linkedLane) : null;
-        // D: near()가 실제로 쓴 값. 그 전에 판정이 끝났으면(no-dist 등) 이 종류의 기본 D(-가 아니라 350·1050)를 적는다
-        int d = nearD >= 0 ? nearD : expressway(x.type) ? D_EXPRESSWAY : D_GENERAL;
-        String tbt = near != null
-                ? "tbt display " + near[0] + " side " + near[1] + " dir " + near[2] * 7.5f + " bar " + near[3] + " barErr 0 unit " + unit
-                : "tbt display " + icon + " side 0 dir 0.0 bar " + BAR_FAR + " barErr " + BAR_FAR_ERR + " unit " + unit;
-        String key = index + " " + x.type + " " + (x.hasLane ? String.valueOf(x.linkedLane) : "-") + " " + (lanes == null ? "-" : String.valueOf(lanes))
-                + " " + u.laneIndex + "/" + u.laneCount + "/" + (u.lanesShown ? 1 : 0) + " " + (u.distNextSeen ? "m" : "-") + " " + d
-                + " " + nearWhy + " " + tbt;
-        if (key.equals(diagKey)) return;
-        diagKey = key;
-        diag("CarPlay diag: maneuver " + index + " type " + x.type + " link " + (x.hasLane ? String.valueOf(x.linkedLane) : "-")
-                + " lanes " + (lanes == null ? "-" : String.valueOf(lanes))
-                + " rg lanes " + u.laneIndex + "/" + u.laneCount + "/" + (u.lanesShown ? 1 : 0)
-                + " remain " + (u.distNextSeen ? u.distNext + "m" + (u.distNextFresh ? "" : " old") : "-")
-                + " d " + d + " -> " + (near != null ? "near" : "far") + " (" + nearWhy + "); " + tbt + " dist " + dist);
-    }
-
-    /** 막대 = 10 x max(1, floor(남은 x 10 / D)), 100까지(순정 SetCase*의 (100 - p) / 10, 9 이하이면 1) */
-    static int bar(int remain, int d) {
-        int b = (int) ((long) remain * 10L / d);
-        if (b < 1) b = 1;
-        // 순정 최대값은 90이다(차 로그 2026-11-09, 남은 거리 < D)
-        if (b > 9) b = 9;
-        return b * 10;
-    }
-
-    /** D를 고속도로 값(1050m)으로 쓰는 종류: 고속도로 출구·출구 램프·고속도로 바꾸기(iAP2는 도로 종류를 주지 않음) */
-    static boolean expressway(int type) {
-        return type == 8 || type == 22 || type == 23 || type == 51 || type == 52 || type == 53;
-    }
-
-    /**
-     * 곧 회전 {표시 번호, 나가는 길 옆길 비트 번호(-1: 옆길 없음), 방향 칸} 또는 곧 회전 화면이 없는 종류면 null.
-     * 순정 SetCase*: 고속도로 출구 17/18(방향 12·36), 유턴 31(오른쪽 통행 36, 왼쪽 통행 12), Y자 갈림 25, 회전교차로는 출구
-     * 아이콘 그대로, 그 밖의 회전 지점 13. 방향은 나가는 길 칸(각도가 없으면 종류의 기본 방향). 고가·지하차도(43~46)·
-     * 터널·톨은 iAP2에 해당 종류가 없다. "바로 다음 안내와 겹침"(19/20)은 폰 정보로 정할 수 없어 쓰지 않는다.
-     */
-    static int[] nearDisplay(int type, int side, int junction, int exit, int icon) {
-        switch (type) {
-            case 22: case 52: return new int[] { NEAR_EXIT_LEFT, -1, 36 };
-            case 23: case 53: return new int[] { NEAR_EXIT_RIGHT, -1, 12 };
-            case 8: case 51: {
-                boolean left = exit < 0 || (exit == 0 && side == 1);
-                return left ? new int[] { NEAR_EXIT_LEFT, -1, 36 } : new int[] { NEAR_EXIT_RIGHT, -1, 12 };
-            }
-            case 4: case 26: return new int[] { NEAR_UTURN, -1, side == 1 ? 12 : 36 };
-            case 13: return new int[] { NEAR_FORK, -1, exit != 0 ? exitSlot(exit) : 42 };
-            case 14: return new int[] { NEAR_FORK, -1, exit != 0 ? exitSlot(exit) : 6 };
-            default: break;
-        }
-        if (junction == 1 || type == 6 || type == 7 || type == 19 || (type >= 28 && type <= 46)) {
-            // 회전교차로: 출구 아이콘 그대로 + 막대, 방향은 출구 칸
-            if (icon == NO_ICON || icon <= 0) return null;
-            return new int[] { icon, exitBit(exit), exitSlot(exit) };
-        }
-        int dir;
-        switch (type) {
-            case 1: case 20: dir = 36; break;
-            case 2: case 21: dir = 12; break;
-            case 47: dir = 30; break;
-            case 48: dir = 18; break;
-            case 49: dir = 42; break;
-            case 50: dir = 6; break;
-            case 3: case 5: case 9: dir = 0; break;
-            default: return null;   // 0 회전 없음, 10·12·24·25·27 목적지, 11·18 출발, 15~17 페리
-        }
-        return exit != 0 ? new int[] { NEAR_TURN, exitBit(exit), exitSlot(exit) } : new int[] { NEAR_TURN, dir / 3, dir };
-    }
-
-    /** 나가는 길의 옆길 비트 번호: 보통 streetBit, 뒤쪽이면 179도 이하 7, 그 밖 8(순정 SetSideStreetBit) */
-    static int exitBit(int exit) {
-        int b = streetBit(exit);
-        if (b >= 0) return b;
-        int cw = ((exit % 360) + 360) % 360;
-        return cw <= 179 ? 7 : 8;
-    }
-
-    /** 나가는 길 각도(도, 들어온 방향 기준, 오른쪽 +)의 방향 칸(7.5도 단위): 옆길 비트 n이면 3n, 뒤쪽이면 21·27(순정 SetSideStreetBit) */
-    static int exitSlot(int exit) {
-        int b = streetBit(exit);
-        if (b >= 0) return 3 * b;
-        int cw = ((exit % 360) + 360) % 360;
-        return cw <= 179 ? 21 : 27;
-    }
-
-    /**
-     * 각도 하나의 옆길 비트 번호(순정 SetSideStreetBit, 들어온 방향 기준 시계 방향): 직진(348~12도) 0, 그다음 22.5도 칸마다
-     * 1~15(비트 n의 가운데가 약 n x 22.5도). 들어온 길 쪽(180도 ±12도)은 -1(비트 없음).
-     */
-    static int streetBit(int angle) {
-        int cw = ((angle % 360) + 360) % 360;
-        if (cw >= 348 || cw <= 12) return 0;
-        if (cw > 168 && cw < 192) return -1;
-        int n = (int) ((cw - 12) / 22.5) + 1;
-        return n > 15 ? 15 : n;
-    }
-
-    /**
-     * 옆길 비트(16비트): 교차로의 다른 길 각도(iAP2 item 10)와 나가는 길(방향 칸)의 비트. 나가는 길이 뒤쪽이면 비트 7(179도
-     * 이하) 또는 8(순정). 다른 길 각도가 없으면 나가는 길 비트만(차-3에서 나가는 길 비트가 주황으로 그려짐, V-9).
-     */
-    static int sideBits(int[] angles, int exitBit) {
-        int bits = 0;
-        if (angles != null) {
-            for (int a : angles) {
-                int b = streetBit(a);
-                if (b >= 0) bits |= 1 << b;
-            }
-        }
-        if (exitBit >= 0 && exitBit <= 15) bits |= 1 << exitBit;
-        return bits & 0xFFFF;
-    }
-
-    /**
-     * The cluster icon for a maneuver: iAP2 ManeuverType, driving side (0 right-hand
-     * traffic, 1 left), junction type (0 intersection, 1 roundabout) and exit angle, as
-     * the turn-by-turn build maps them, then a plain turn at an angle the table doesn't list
-     * (bandedTurn). 0: neither; turn() then uses fallbackIcon.
-     */
-    static int icon(int type, int side, int junction, int exit, int state) {
-        int i = exactIcon(type, side, junction, exit, state);
-        return i != 0 ? i : bandedTurn(type, junction, exit);
-    }
-
-    /**
-     * The cluster's "no turn icon": distances, lanes and trip still go out. Gen5W firmware
-     * (libExSLNavi RGIconIDToClusterDispType) falls back to 8; 64 showed as a spinning
-     * "loading" glyph. Below the HUD list's 64, so sendHud blanks the HUD list instead
-     * (from HMG-Seogaemo).
-     */
+    /** 다음 회전 작은 아이콘(aheadIcon)에 그릴 것이 없을 때의 값. HUD 목록·다음 회전 목록에서만 쓴다(지금대로) */
     static final int NO_ICON = 8;
-
-    /**
-     * A plain intersection turn at an angle the exact table doesn't list (75 degrees, 30,
-     * left-hand traffic ...): the nearest of the three basic arrows. Slight up to 67 degrees,
-     * turn up to 112, sharp past that (the lane arrows' bands); a type that says sharp or
-     * slight keeps that. No angle (0) or a roundabout: 0 (from HMG-Seogaemo).
-     */
-    static int bandedTurn(int type, int junction, int exit) {
-        if (junction != 0 || exit == 0) return 0;
-        boolean left;
-        switch (type) {
-            case 1: case 47: case 49: left = true; break;
-            case 2: case 48: case 50: left = false; break;
-            default: return 0;
-        }
-        int a = Math.abs(exit);
-        if (a > 180) a = 360 - a;
-        int sharpness = type == 47 || type == 48 ? 2 : type == 49 || type == 50 ? 0 : a <= 67 ? 0 : a <= 112 ? 1 : 2;
-        // slight 66/71, turn 67/70, sharp 68/69 (right/left)
-        return left ? 71 - sharpness : 66 + sharpness;
-    }
-
-    /**
-     * An icon for a maneuver neither table lists, so the rest still goes out. A misleading
-     * arrow is worse than none: with an exit angle, the nearest direction arrow; a type with a
-     * clear meaning but no angle (Apple Maps and Naver Map in Korea send none), its own icon;
-     * else NO_ICON, never "straight" for a turn (from HMG-Seogaemo).
-     */
-    static int fallbackIcon(int type, int side, int junction, int exit) {
-        // departure (StartRoute) is no turn, whatever angle comes with it (upstream 83eb4ef)
-        if (type == 11) return NO_ICON;
-        // Korea Projection 2.3.0: the Korean stock numbers by type, whatever the angle (1.7.1 map 2-A):
-        // types the stock DiPO table leaves out (it then sends nothing and the previous arrow stays),
-        // with numbers the stock engine itself uses, and the stock ramps without their exact geometry
-        switch (type) {
-            case 8: case 51: return 163;        // off-ramp, change highway: highway exit, straight
-            case 9: return 160;                 // on-ramp
-            case 22: return 165;                // highway off-ramp left
-            case 23: return 164;                // highway off-ramp right
-            case 16: case 17: return 176;       // exit / change ferry
-            case 20: return 70;                 // left turn at the end of the road
-            case 21: return 67;                 // right turn at the end of the road
-            case 26: return side == 1 ? 73 : 72; // U-turn when possible
-            case 27: return 112;                // end of directions: destination ahead
-            default: break;
-        }
-        int a = bandedTurn(type, junction, exit);
-        if (a != 0) return a;
-        if (exit != 0) {
-            if (junction != 0) return roundaboutIcon(side, exit);
-            boolean left;
-            switch (type) {
-                case 1: case 47: case 49: case 13: left = true; break;
-                case 2: case 48: case 50: case 14: left = false; break;
-                default: left = exit < 0; break;
-            }
-            int deg = Math.abs(exit);
-            if (deg > 180) deg = 360 - deg;
-            if (deg >= 157) return side == 0 ? 72 : 73;
-            if (deg <= 22 && type != 1 && type != 2) return 65;
-            int sharpness = deg <= 67 ? 0 : deg <= 112 ? 1 : 2;
-            return left ? 71 - sharpness : 66 + sharpness;
-        }
-        switch (type) {
-            case 1: return 70;    // left turn
-            case 2: return 67;    // right turn
-            case 47: return 69;   // sharp left
-            case 48: return 68;   // sharp right
-            case 49: return 71;   // slight left
-            case 50: return 66;   // slight right
-            case 13: return 71;   // keep left
-            case 14: return 66;   // keep right
-            case 3: return 65;
-            case 4: case 18: return side == 0 ? 72 : 73;
-            case 5: return 172;
-            case 6: return side == 0 ? 96 : 97;   // enter a roundabout
-            case 10: case 12: return 112;
-            case 15: return 176;
-            default: return NO_ICON;       // 0 no turn, 7 exit roundabout, 11 start ...
-        }
-    }
-
-    /**
-     * A roundabout exit the exact table doesn't list for this type: first the exit angles the
-     * stock DiPO table uses, with its icons (right-hand traffic: 0 96, 90 99, 135 100, 180 102,
-     * -45 104, -90 105, -135 104; left-hand traffic: its side-1 values), then the nearest of the
-     * stock engine's 8 roundabout directions (A family; 1.7.1 map 2-C): 45-degree bands centred on
-     * 0, 45, 90 ... Left-hand traffic keeps the A family (B 192-203 can't be checked in Korea).
-     */
-    static int roundaboutIcon(int side, int exit) {
-        int e = exit;
-        if (e > 180) e -= 360;
-        else if (e < -180) e += 360;
-        if (side == 1) {
-            switch (e) {
-                case 0: return 97;
-                case 90: return 99;
-                case 120: return 100;
-                case 180: case -180: return 102;
-                case -120: return 104;
-                case -90: return 105;
-                case -30: return 107;
-                default: break;
-            }
-        } else {
-            switch (e) {
-                case 0: return 96;
-                case 90: return 99;
-                case 135: return 100;
-                case 180: case -180: return 102;
-                case -45: return 104;
-                case -90: return 105;
-                case -135: return 104;
-                default: break;
-            }
-        }
-        int a = Math.abs(e);
-        if (a <= 22) return 96;
-        if (a >= 158) return 102;
-        if (e > 0) return a <= 67 ? 97 : a <= 112 ? 99 : 100;
-        return a <= 67 ? 107 : a <= 112 ? 105 : 104;
-    }
 
     /** the maneuver's values (numbers only: no road or instruction text) when they change, up to MANEUVER_LOGS_MAX lines */
     void logManeuver(Maneuver x, int state, int icon, String how) {
@@ -1148,33 +738,38 @@ final class CpTurns {
                 + " state " + state + " -> icon " + icon + " (" + how + ")");
     }
 
-    /** the turn-by-turn build's exact table (0: not in it) */
+    /**
+     * 순정 DiPO 표(e/u.a의 ManeuverType 스위치, 1.7.4에서 한 줄씩 대조: drafts/1.7.4-tbt-diff.md 1장). 0이면 표에 없음 →
+     * 순정처럼 updateTBTInfo를 보내지 않는다. 좌측통행(side 1) 회전교차로는 순정 B 계열(192~203).
+     * 예외 하나(판단 대기, mod.md 1.7.4 "판단 필요" 1): 좌회전(1)·우회전(2)이 교차로(junction 0)에서 각도 없이(0) 오면
+     * 지금처럼 70·67을 보낸다(순정 표에는 없음. 애플 지도·네이버 지도는 카플레이로 각도를 보내지 않는다).
+     */
     static int exactIcon(int type, int side, int junction, int exit, int state) {
         switch (type) {
-            // Ordinary left/right types carry the direction even when the optional
-            // exit angle is absent (the parser resets it to zero on every update).
             case 1:   // left turn
                 if (junction == 0 && exit == -120) return 69;
-                if ((side == 0 || side == 1) && junction == 0 && (exit == -90 || exit == 0)) return 70;
+                if (side == 0 && junction == 0 && exit == -90) return 70;
                 if (junction == 0 && exit == -60) return 71;
                 if (junction == 0 && exit == -45) return 145;
-                if (side == 1 && junction == 1 && exit == -120) return 104;
-                if (side == 1 && junction == 1 && exit == -90) return 105;
-                if (side == 1 && junction == 1 && exit == -30) return 107;
+                if (side == 1 && junction == 1 && exit == -120) return 200;
+                if (side == 1 && junction == 1 && exit == -90) return 201;
+                if (side == 1 && junction == 1 && exit == -30) return 203;
+                if ((side == 0 || side == 1) && junction == 0 && exit == 0) return 70;   // 판단 대기(위 예외)
                 return 0;
             case 2:   // right turn
                 if (junction == 0 && exit == 60) return 66;
-                if ((side == 0 || side == 1) && junction == 0 && (exit == 90 || exit == 0)) return 67;
+                if (side == 0 && junction == 0 && exit == 90) return 67;
                 if (junction == 0 && exit == 120) return 68;
                 if (side == 0 && junction == 1 && exit == 0) return 96;
-                if (side == 1 && junction == 1 && exit == 0) return 97;
-                if (side == 1 && junction == 1 && exit == 90) return 99;
-                if (side == 1 && junction == 1 && exit == 120) return 100;
-                if (side == 1 && junction == 1 && exit == 180) return 102;
+                if (side == 1 && junction == 1 && exit == 0) return 193;
+                if (side == 1 && junction == 1 && exit == 90) return 195;
+                if (side == 1 && junction == 1 && exit == 120) return 196;
+                if (side == 1 && junction == 1 && exit == 180) return 198;
                 if (side == 0 && junction == 0 && exit == 45) return 144;
+                if ((side == 0 || side == 1) && junction == 0 && exit == 0) return 67;   // 판단 대기(위 예외)
                 return 0;
             case 3:   // straight
-                return (side == 0 || side == 1) && junction == 0 && exit == 0 ? 65 : 0;
+                return side == 0 && junction == 0 && exit == 0 ? 65 : 0;
             case 4:   // U-turn
                 if (side == 0 && junction == 0) return 72;
                 if (side == 1 && junction == 0) return 73;
@@ -1187,8 +782,6 @@ final class CpTurns {
                 int i = side == 0 && junction == 0 ? 112 : 0;
                 return state == 2 ? 3 : i;
             }
-            case 11:  // departure: NO_INFO, not a turn inferred from missing geometry
-                return (side == 0 || side == 1) && junction == 0 && exit == 0 ? 1 : 0;
             case 15: return side == 0 && junction == 0 && exit == 0 ? 176 : 0;
             case 19: return side == 0 && junction == 1 && exit == -180 ? 102 : 0;
             // highway off-ramp left / right: 165 / 164 in the Korean stock DiPO (the US build had 82 / 81)
@@ -1200,7 +793,7 @@ final class CpTurns {
             case 29: return side == 0 && junction == 1 && exit == 90 ? 99 : 0;
             case 31:
                 if (side == 0 && junction == 1 && exit == 0) return 97;
-                if (side == 1 && junction == 1 && exit == 0) return 96;
+                if (side == 1 && junction == 1 && exit == 0) return 192;
                 return 0;
             case 32: return side == 0 && junction == 1 && exit == -45 ? 104 : 0;
             case 33: return side == 0 && junction == 1 && exit == -90 ? 105 : 0;
@@ -1264,21 +857,6 @@ final class CpTurns {
 
     /** the HUD's list frame (0xF2): count, this icon, the next turn's icon, 0, road after this turn (UTF-16LE) */
     void sendHud(int type, Integer id, Update u) {
-        if (type == NO_ICON) {
-            // no arrow for this maneuver: the empty list blanks the HUD's turn, so the previous
-            // turn's arrow doesn't stay up (from HMG-Seogaemo, seen on their car 2026-11-05)
-            if (lastHud != null && lastHud.length == 2 && lastHud[1] == 0) return;
-            // 순정 엔진의 빈 목록은 {F2, 00} 2바이트(M-2, drafts/stock-re/navi-engine-cluster.md 3-3)
-            byte[] empty = { (byte) 0xF2, 0 };
-            cluster.turnListNew(empty);
-            hudShown = true;
-            lastHud = empty;
-            hudAt = now();
-            hudType = -1;
-            hudNext = 0;
-            hudRoad = null;
-            return;
-        }
         if (type < 64) return;
         int next = 0, third = 0;
         String road = "";
@@ -1411,8 +989,6 @@ final class CpTurns {
         hudThird = 0;
         hudRoad = null;
         lastHud = null;
-        crossroad = null;
-        destination = null;
         // 카플레이가 HUD 목록·차로·2C를 보낸 적이 없으면 지우지 않는다: 안내하지 않던 카플레이가 순정 내비의
         // HUD·차로를 지우지 않게(2차 리뷰 2). 보낸 뒤에는 한 번 지우고 다시 보낼 때까지 지우지 않는다.
         if (!hudShown) return;

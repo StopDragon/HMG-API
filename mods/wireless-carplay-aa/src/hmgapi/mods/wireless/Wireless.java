@@ -13,6 +13,8 @@ package hmgapi.mods.wireless;
 // 1.7.2 차-5 뒤 진단: 디버그 로그가 켜졌으면 DiPO 쪽(Dipo.debug → CpTurns)에 알려 곧 회전 판단 진단 줄을 남기게 한다.
 // Korea Projection 1.7.3(2026-11-10, 모드 2.4.1, 계획 A-1): GPM에서 PP가 뜬 뒤(runningPP) 버려진 무선 AA 준비(1)를
 //   한 번 더 보낸다(AaReady). 설정 aa_ready_resend(기본 켬), 패키지 신호 sys.kp.aa_ap=1일 때만.
+// Korea Projection 1.7.4(2026-11-12, 모드 2.4.2, "순정과 똑같이"): 순정 내비 단속 정보 프레임의 막대 칸 바꾸기(TrapBar)와
+//   설정 aa_name_hold를 뺐다. 설정 파일에 옛 aa_name_hold 값이 남아 있어도 읽지 않는다(HMG-API는 모르는 열쇠를 그냥 둔다).
 
 import android.content.ComponentName;
 import android.content.Context;
@@ -51,6 +53,11 @@ import hmgapi.hook.Points;
 public final class Wireless extends ModEntry {
     static final String BTSETTINGS = "com.android.btsettings";
     static final String GPM = "com.google.android.projection.sink";
+    /**
+     * Q-1(1.7.4): Wi-Fi 장치 이름(패키지 hotspot.sh·status.sh의 WIF 기본값과 같음). 1.8.0 USB 동글 준비로 한 곳에 모은다.
+     * DiPO 앱 파트(dipo)는 클래스 로더가 달라 ApCheck.WIFI_IF에 같은 값을 둔다(tools/dupsame이 비교). 밖에서 바꾸는 길은 아직 없다
+     */
+    static final String WIFI_IF = "wlan0";
     static final String GAL_SERVICE = "com.google.android.projection.service.GalReceiverService";
     static final int USB_CLASS_MASS_STORAGE = 8, USB_CLASS_HUB = 9;
     static final String HELPER = "btsettings.projection_helper";
@@ -134,8 +141,6 @@ public final class Wireless extends ModEntry {
         if (!mod.settingBoolean("tbt", true)) return;
         final StockLog seen = new StockLog(debug);
         final StockReplay replay = new StockReplay();
-        // 1.7.2 시험판 3: 폰 막대를 순정 단속 정보 프레임의 막대 칸에 넣는다(없는 차면 null, 나머지는 그대로)
-        final TrapBar trapBar = TrapBar.install(mod, app);
         for (final String m : NAVI_TBT) {
             mod.hook(null, "framework.navigation_cluster." + m, new MethodHook() {
                 @Override
@@ -148,14 +153,6 @@ public final class Wireless extends ModEntry {
                     StockReplay.Out o = replay.call(m, p.thisObject, p.method, p.args, phone, android.os.SystemClock.elapsedRealtime());
                     if (phone) p.setResult(null);
                     resend(mod, o);
-                    // 막대 칸 확인이 실패해도 위의 막기·다시 보내기는 그대로다(리뷰 9)
-                    if (trapBar != null) {
-                        try {
-                            trapBar.check(phone);
-                        } catch (Throwable t) {
-                            // 남기지 않는다(TrapBar가 실패를 한 번 남긴다)
-                        }
-                    }
                     if (o.backupGen != 0) scheduleBackup(mod, app, replay, o.backupGen);
                 }
             });
@@ -367,8 +364,6 @@ public final class Wireless extends ModEntry {
             }
         });
         final java.util.Map<Object, AaTurns> turns = new java.util.WeakHashMap<Object, AaTurns>();
-        // 1.7.3 A-2 규칙을 쓸지(설정 aa_name_hold, 기본 켬). 끄면 이름 바뀜은 2.4.0처럼 바로 보인다
-        final boolean nameHold = mod.settingBoolean("aa_name_hold", true);
         final android.os.HandlerThread thread = new android.os.HandlerThread("hmgapi-aa-tbt");
         thread.start();
         final android.os.Handler handler = new android.os.Handler(thread.getLooper());
@@ -388,7 +383,6 @@ public final class Wireless extends ModEntry {
                                     hmgapi.hook.Cluster c = hmgapi.hook.Cluster.of(app.context);
                                     if (c == null) return;
                                     turns.put(receiver, t = new AaTurns(app.context, c, handler));
-                                    t.nameHold = nameHold;
                                     t.log = new AaTurns.Sink() {
                                         @Override
                                         public void line(String s) {
@@ -468,7 +462,7 @@ public final class Wireless extends ModEntry {
     /**
      * 1.7.3(A-1): GPM의 GalReceiverService$PPActionListener.runningPP() 뒤에, 패키지 신호(sys.kp.aa_ap=1, AaWifi.on)가
      * 있으면 0.5초 뒤 GPM 메인 스레드에서 한 번 AaReady.resend를 부른다(PPService의 binder 호출을 붙잡지 않게, GPM의 다른
-     * 처리와 같은 스레드에서). 반복 타이머는 없다(runningPP마다 한 번). 설정 aa_ready_resend가 꺼져 있으면 훅을 걸지 않는다
+     * 처리와 같은 스레드에서). 신호가 아직 0이면 1초마다 최대 60초 다시 보고 1이 되면 한 번 부른다(B-1, 1.7.4). 반복 타이머는 남지 않는다. 설정 aa_ready_resend가 꺼져 있으면 훅을 걸지 않는다
      * (AaReady.install). HMG-API 지도에 없는 메서드라 Hooks로 직접 건다. 없으면 한 줄 남기고 넘어간다.
      * 리뷰 반영: GalReceiverService.requestWLDeviceReadyStatusUpdate 앞에서 기기별 준비(1) 시각을 적어(AaReady.noteReady),
      * PP가 뜬 뒤 순정이 이미 보낸 기기는 다시 보내지 않는다. 이 훅을 못 걸면 전처럼 모두 보낸다.
@@ -514,7 +508,18 @@ public final class Wireless extends ModEntry {
                 protected void afterHookedMethod(Param p) {
                     final Object listener = p.thisObject;
                     final long since = android.os.SystemClock.elapsedRealtime();
-                    AaReady.onRunningPP(AaWifi.on(mod), new AaReady.Scheduler() {
+                    // B-1(1.7.4): 신호가 아직 0이면 AaReady가 1초마다 최대 60초 다시 본다(그 뒤 반드시 끝남)
+                    AaReady.onRunningPP(new AaReady.Signal() {
+                        @Override
+                        public boolean on() {
+                            return AaWifi.on(mod);
+                        }
+
+                        @Override
+                        public boolean modOff() {
+                            return !mod.enabled();
+                        }
+                    }, new AaReady.Scheduler() {
                         @Override
                         public void postDelayed(Runnable r, long ms) {
                             new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(r, ms);
@@ -528,7 +533,7 @@ public final class Wireless extends ModEntry {
                                 mod.log(AaReady.LINE + "못 함 (" + t.getClass().getSimpleName() + ")");
                             }
                         }
-                    });
+                    }, log);
                 }
             });
             mod.log("Android Auto: ready resend hook in " + app.processName + " (active only while " + AaWifi.PROP + "=1)");

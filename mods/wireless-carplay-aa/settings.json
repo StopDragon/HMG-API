@@ -53,14 +53,6 @@
       "apply": "restart",
       "title": "Wireless Android Auto: resend ready after phone projection starts",
       "description": "Korean build. A hook in the Android Auto app (no files changed): when the phone projection app starts after the phone's wireless setup, the ready signal it missed is sent again. Only while Korea Projection runs its hotspot."
-    },
-    {
-      "key": "aa_name_hold",
-      "type": "toggle",
-      "default": true,
-      "apply": "restart",
-      "title": "Android Auto cluster: keep the turn icon when the phone sends a road name change for the same point",
-      "description": "Korean build. When the phone alternates a turn and a road name change for the same point, the cluster keeps the turn icon and only the road name changes. Off: name changes show at once (as 2.4.0)."
     }
   ]
 }

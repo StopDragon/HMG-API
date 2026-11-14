@@ -70,11 +70,109 @@ final class AaReady {
         return true;
     }
 
-    /** runningPP 뒤: 패키지 신호가 있을 때만 DELAY_MS 뒤 한 번 job을 부르게 한다. 걸었으면 true */
-    static boolean onRunningPP(boolean signal, Scheduler s, Runnable job) {
-        if (!signal) return false;
-        s.postDelayed(job, DELAY_MS);
-        return true;
+    /** 패키지 신호(sys.kp.aa_ap=1)를 읽는 쪽(Wireless: AaWifi.on, 시험: 가짜). 부를 때마다 새로 읽는다 */
+    interface Signal {
+        boolean on();
+
+        /** 리뷰 낮음 4: 모드가 꺼졌다(Wireless: !mod.enabled()). 참이면 다시 보기를 줄 없이 바로 끝낸다 */
+        boolean modOff();
+    }
+
+    /** B-1(1.7.4): 신호가 0이면 이 간격(ms)으로 다시 본다 */
+    static final long RECHECK_MS = 1000L;
+    /** B-1(1.7.4): 다시 보는 최대 횟수. RECHECK_MS × RECHECK_MAX = 60초에서 반드시 끝난다 */
+    static final int RECHECK_MAX = 60;
+    /** runningPP마다 하나씩 는다. 다시 보기는 자기 번호가 최신일 때만 이어 간다(새 PP 시작이 이어받음) */
+    private static int gen;
+
+    private static synchronized int nextGen() {
+        return ++gen;
+    }
+
+    private static synchronized boolean current(int g) {
+        return g == gen;
+    }
+
+    /**
+     * runningPP 뒤. 신호가 1이면 DELAY_MS 뒤 한 번 job을 부르게 하고 true(2.4.1과 같음).
+     * B-1(1.7.4, #64): AP 신호와 PP 시작이 같은 초면 신호가 아직 0이다. 그때는 RECHECK_MS마다 최대 RECHECK_MAX번 다시 보고,
+     * 1이 되면 job을 한 번만 부른 뒤 끝낸다. 60초 내내 0이면 로그 한 줄(숫자만)을 남기고 끝낸다. 반복 타이머는 남지 않는다:
+     * 한 번 볼 때마다 다음 한 번만 걸고, 그 사이 새 runningPP가 오면 옛 다시 보기는 조용히 멈춘다(새 것이 이어받음).
+     * 같은 기기에 겹쳐 보내는 것은 job(resend)의 readySince·resentRecently가 막는다. 신호를 기다리기 시작했으면 false.
+     */
+    static boolean onRunningPP(Signal sig, Scheduler s, Runnable job, Log log) {
+        int g = nextGen();
+        if (off(sig)) return false;   // 모드가 꺼짐: 걸지 않음(옛 다시 보기도 세대가 바뀌어 멈춤)
+        if (read(sig)) {
+            s.postDelayed(job, DELAY_MS);
+            return true;
+        }
+        s.postDelayed(new Recheck(g, 1, sig, s, job, log), RECHECK_MS);
+        return false;
+    }
+
+    /** 모드가 꺼졌는지. 읽다가 예외가 나면 꺼지지 않은 것으로 본다(60초 한도가 끝을 지킴) */
+    static boolean off(Signal sig) {
+        try {
+            return sig.modOff();
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /** 신호 읽기에서 예외가 나면 0으로 본다 */
+    static boolean read(Signal sig) {
+        try {
+            return sig.on();
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /** B-1 다시 보기 한 번(k번째). GPM 메인 Handler에서 돈다. 예외를 밖으로 내지 않는다 */
+    static final class Recheck implements Runnable {
+        final int g, k;
+        final Signal sig;
+        final Scheduler s;
+        final Runnable job;
+        final Log log;
+
+        Recheck(int g, int k, Signal sig, Scheduler s, Runnable job, Log log) {
+            this.g = g;
+            this.k = k;
+            this.sig = sig;
+            this.s = s;
+            this.job = job;
+            this.log = log;
+        }
+
+        @Override
+        public void run() {
+            try {
+                if (!current(g)) return;   // 새 runningPP가 이어받음
+                if (off(sig)) return;   // 모드가 꺼짐: 줄 없이 끝(리뷰 낮음 4)
+                if (read(sig)) {
+                    try {
+                        log.line(LINE + "신호 기다림 " + k + "초");
+                    } catch (Throwable ignored) {
+                        // 리뷰 낮음 3: 로그가 실패해도 다시 보내기는 한다
+                    }
+                    job.run();
+                    return;
+                }
+                if (k >= RECHECK_MAX) {
+                    log.line(LINE + "0대 (신호 없음 " + (RECHECK_MAX * RECHECK_MS / 1000L) + "초)");
+                    return;
+                }
+                s.postDelayed(new Recheck(g, k + 1, sig, s, job, log), RECHECK_MS);
+            } catch (Throwable t) {
+                try {
+                    log.line(LINE + "못 함 (" + t.getClass().getSimpleName() + ")");
+                } catch (Throwable ignored) {
+                    // 로그도 못 쓰면 그냥 끝낸다
+                }
+            }
+        }
     }
 
     /** 기기 주소 → 순정이 마지막으로 준비(1)를 보낸 시각(ms). 메모리에만 있고 로그·파일에 쓰지 않는다 */

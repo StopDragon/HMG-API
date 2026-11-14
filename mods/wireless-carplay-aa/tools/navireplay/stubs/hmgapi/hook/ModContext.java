@@ -24,7 +24,11 @@ public final class ModContext {
 
     public boolean enabled() { return true; }
 
+    /** 시험용: 모드가 읽은 설정 열쇠 */
+    public final java.util.Set<String> asked = new java.util.HashSet<String>();
+
     public boolean settingBoolean(String key, boolean fallback) {
+        asked.add(key);
         Boolean v = settings.get(key);
         return v == null ? fallback : v.booleanValue();
     }

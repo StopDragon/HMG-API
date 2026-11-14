@@ -119,15 +119,6 @@ public final class AaReadyTest {
             off = true;
         }
         check("review 5: setting aa_ready_resend off: no hook; on: hooked once", !off && on && installed[0] == 1);
-        final List<Long> posted = new ArrayList<Long>();
-        final List<Runnable> jobs = new ArrayList<Runnable>();
-        AaReady.Scheduler sch = new AaReady.Scheduler() {
-            @Override
-            public void postDelayed(Runnable r, long ms) {
-                posted.add(Long.valueOf(ms));
-                jobs.add(r);
-            }
-        };
         final int[] ran = { 0 };
         Runnable job = new Runnable() {
             @Override
@@ -135,13 +126,193 @@ public final class AaReadyTest {
                 ran[0]++;
             }
         };
-        boolean noSig = AaReady.onRunningPP(false, sch, job);
-        check("review 5: no package signal (sys.kp.aa_ap not 1): nothing scheduled", !noSig && posted.isEmpty());
-        boolean sig = AaReady.onRunningPP(true, sch, job);
+        final boolean[] sigv = { true };
+        final boolean[] modOffv = { false };
+        AaReady.Signal sig = new AaReady.Signal() {
+            @Override
+            public boolean on() {
+                return sigv[0];
+            }
+
+            @Override
+            public boolean modOff() {
+                return modOffv[0];
+            }
+        };
+        Sched sch = new Sched();
+        boolean sigNow = AaReady.onRunningPP(sig, sch, job, LOG);
         check("review 5: with the signal: one call scheduled 500 ms later, not run at once",
-                sig && posted.equals(java.util.Arrays.asList(Long.valueOf(500L))) && ran[0] == 0);
-        jobs.get(0).run();
-        check("review 5: the scheduled call runs the resend once (no repeat)", ran[0] == 1 && jobs.size() == 1);
+                sigNow && sch.posted.equals(java.util.Arrays.asList(Long.valueOf(500L))) && ran[0] == 0);
+        sch.runAll(null);
+        check("review 5: the scheduled call runs the resend once (no repeat)", ran[0] == 1 && sch.q.isEmpty() && sch.posted.size() == 1);
+
+        // B-1(1.7.4) 재현: AP 신호가 PP 시작보다 늦게 1이 되는 첫 부팅(#64). 2.4.1은 신호를 한 번만 읽어 다시 보지 않았다
+        clear();
+        ran[0] = 0;
+        sigv[0] = false;
+        sch = new Sched();
+        boolean noSig = AaReady.onRunningPP(sig, sch, job, LOG);
+        check("B-1 repro: signal 0 at runningPP (AP comes up in the same second): a recheck is scheduled 1 s later",
+                !noSig && sch.posted.equals(java.util.Arrays.asList(Long.valueOf(1000L))) && ran[0] == 0);
+        sch.runUntil(2999L);
+        check("B-1: still 0 at 1 s and 2 s: nothing sent yet, nothing logged, one check pending", ran[0] == 0 && logs.isEmpty() && sch.q.size() == 1);
+        sigv[0] = true;
+        sch.runAll(null);
+        check("B-1: signal 1 at 3 s: the resend runs once at 3 s, then nothing is left scheduled",
+                ran[0] == 1 && sch.now == 3000L && sch.q.isEmpty());
+        check("B-1: one line with the wait in seconds (numbers only)", logs.equals(java.util.Arrays.asList("AA 준비 다시 보냄 신호 기다림 3초")));
+
+        // B-1: 60초 내내 0 → 60번 보고 끝, 로그 한 줄, 남는 타이머 없음
+        clear();
+        ran[0] = 0;
+        sigv[0] = false;
+        sch = new Sched();
+        AaReady.onRunningPP(sig, sch, job, LOG);
+        sch.runAll(null);
+        check("B-1: signal 0 for 60 s: exactly 60 checks, the last at 60 s, then nothing scheduled (the loop ends)",
+                sch.ran == 60 && sch.now == 60000L && sch.q.isEmpty() && ran[0] == 0 && AaReady.RECHECK_MAX * AaReady.RECHECK_MS == 60000L);
+        check("B-1: giving up leaves one line, numbers only: '0대 (신호 없음 60초)'",
+                logs.equals(java.util.Arrays.asList("AA 준비 다시 보냄 0대 (신호 없음 60초)")));
+        sigv[0] = true;
+        sch.runAll(null);
+        check("B-1: a signal after giving up sends nothing (no check left)", ran[0] == 0 && sch.ran == 60);
+
+        // B-1: 기다리는 중에 runningPP가 또 옴(PP 다시 시작·리스너 바뀜) → 옛 다시 보기는 멈추고 새 것 하나만 이어 간다
+        clear();
+        ran[0] = 0;
+        sigv[0] = false;
+        sch = new Sched();
+        AaReady.onRunningPP(sig, sch, job, LOG);
+        sch.runUntil(10000L);
+        AaReady.onRunningPP(sig, sch, job, LOG);
+        sch.runUntil(12500L);
+        check("B-1: second runningPP at 10 s: the old chain stops, only one check pending", sch.q.size() == 1);
+        sigv[0] = true;
+        sch.runAll(null);
+        check("B-1: signal 1 at 13 s: the resend runs once, not twice", ran[0] == 1 && sch.q.isEmpty()
+                && logs.equals(java.util.Arrays.asList("AA 준비 다시 보냄 신호 기다림 3초")));
+        clear();
+        sigv[0] = false;
+        sch = new Sched();
+        AaReady.onRunningPP(sig, sch, job, LOG);
+        sch.runUntil(30000L);
+        AaReady.onRunningPP(sig, sch, job, LOG);
+        sch.runAll(null);
+        check("B-1: a new runningPP restarts the 60 s, the whole thing still ends (30 s + 60 s, one give-up line)",
+                sch.now == 90000L && sch.q.isEmpty() && logs.equals(java.util.Arrays.asList("AA 준비 다시 보냄 0대 (신호 없음 60초)")));
+        clear();
+        ran[0] = 0;
+        sch = new Sched();
+        AaReady.onRunningPP(sig, sch, job, LOG);
+        sch.runUntil(5000L);
+        sigv[0] = true;
+        AaReady.onRunningPP(sig, sch, job, LOG);
+        sch.runAll(null);
+        check("B-1: a new runningPP with the signal already 1 takes over: one resend (500 ms), the old chain sends nothing",
+                ran[0] == 1 && sch.q.isEmpty() && logs.isEmpty());
+
+        // B-1: 신호 읽기 예외는 0으로, job 예외는 한 줄 남기고 끝(GPM 메인 스레드로 예외가 나가지 않음)
+        clear();
+        ran[0] = 0;
+        sch = new Sched();
+        AaReady.onRunningPP(new AaReady.Signal() {
+            @Override
+            public boolean on() {
+                throw new IllegalStateException("no SystemProperties");
+            }
+
+            @Override
+            public boolean modOff() {
+                throw new IllegalStateException("no ModContext");
+            }
+        }, sch, job, LOG);
+        sch.runAll(null);
+        check("B-1: the signal read throws: treated as 0, ends at 60 s with one line", ran[0] == 0 && sch.now == 60000L && sch.q.isEmpty() && logs.size() == 1);
+        clear();
+        sigv[0] = false;
+        sch = new Sched();
+        AaReady.onRunningPP(sig, sch, new Runnable() {
+            @Override
+            public void run() {
+                throw new IllegalStateException("boom");
+            }
+        }, LOG);
+        sch.runUntil(1500L);
+        sigv[0] = true;
+        String thrown = sch.runAll(null);
+        check("B-1: the resend throws inside a check: caught, one line with the kind only, nothing left scheduled",
+                thrown == null && sch.q.isEmpty() && logs.size() == 2 && "AA 준비 다시 보냄 못 함 (IllegalStateException)".equals(logs.get(1)));
+
+        // 리뷰 낮음 4: 기다리는 중에 모드가 꺼짐 → 다음 볼 때 줄 없이 끝. 처음부터 꺼져 있으면 걸지 않음
+        clear();
+        ran[0] = 0;
+        sigv[0] = false;
+        sch = new Sched();
+        AaReady.onRunningPP(sig, sch, job, LOG);
+        sch.runUntil(5000L);
+        modOffv[0] = true;
+        sigv[0] = true;
+        sch.runAll(null);
+        check("review L4: the mod turned off while waiting: the next check ends it, no line, nothing sent",
+                ran[0] == 0 && logs.isEmpty() && sch.q.isEmpty() && sch.now == 6000L);
+        sch = new Sched();
+        boolean offStart = AaReady.onRunningPP(sig, sch, job, LOG);
+        check("review L4: the mod already off at runningPP: nothing scheduled", !offStart && sch.posted.isEmpty() && logs.isEmpty());
+        modOffv[0] = false;
+        // 리뷰 낮음 3: 로그가 실패해도 다시 보내기는 함
+        clear();
+        ran[0] = 0;
+        sigv[0] = false;
+        sch = new Sched();
+        AaReady.onRunningPP(sig, sch, job, new AaReady.Log() {
+            @Override
+            public void line(String s) {
+                throw new IllegalStateException("log full");
+            }
+        });
+        sch.runUntil(1500L);
+        sigv[0] = true;
+        String th = sch.runAll(null);
+        check("review L3: the log throws when the signal comes: the resend still runs once, nothing escapes", ran[0] == 1 && th == null && sch.q.isEmpty());
+
+        // B-1: 늦게 온 신호로 실제 resend를 부름. PP가 뜬 뒤(since) 순정이 이미 준비(1)를 보낸 기기는 겹쳐 보내지 않음(readySince)
+        clear();
+        AaReady.clearReady();
+        listener(null);
+        sigv[0] = false;
+        sch = new Sched();
+        final Sched fs = sch;
+        final ClassLoader fcl = cl;
+        final Object fpp = pp;
+        final long since = 1000L;
+        AaReady.onRunningPP(sig, sch, new Runnable() {
+            @Override
+            public void run() {
+                AaReady.resend(fcl, fpp, LOG, since, since + fs.now);
+            }
+        }, LOG);
+        sch.runUntil(2500L);
+        AaReady.noteReady(new WLDeviceInfo(A, "SER-A"), Integer.valueOf(1), since + 2500L);   // 기다리는 사이 순정이 A에 보냄
+        sigv[0] = true;
+        sch.runAll(null);
+        check("B-1: late signal: stock already sent ready to A after PP started, so only E is sent ('1대 (이미 보냄 1)')",
+                sent.equals(java.util.Arrays.asList(E + " SER-E 1"))
+                        && logs.equals(java.util.Arrays.asList("AA 준비 다시 보냄 신호 기다림 3초", "AA 준비 다시 보냄 1대 (이미 보냄 1)")));
+        clear();
+        sigv[0] = true;
+        sch = new Sched();
+        final Sched fs2 = sch;
+        AaReady.onRunningPP(sig, sch, new Runnable() {
+            @Override
+            public void run() {
+                AaReady.resend(fcl, fpp, LOG, since, since + 3000L + fs2.now);
+            }
+        }, LOG);
+        sch.runAll(null);
+        check("B-1: runningPP again right after our late resend: nothing sent twice ('0대 (이미 보냄 1) (방금 보냄 1)')",
+                sent.isEmpty() && logs.equals(java.util.Arrays.asList("AA 준비 다시 보냄 0대 (이미 보냄 1) (방금 보냄 1)")));
+        sigv[0] = true;
+        AaReady.clearReady();
 
         // 6단계 L5: runningPP가 짧게 두 번 옴 → 두 번째(2초 뒤)는 같은 기기에 다시 보내지 않음, 5초 뒤면 다시 보냄
         clear();
@@ -237,5 +408,47 @@ public final class AaReadyTest {
         for (String s : allLogs) if (s.contains("00:11") || s.contains("SER-")) clean = false;
         check("A-1: no address or serial in any log line (" + allLogs.size() + " lines)", clean && allLogs.size() >= 10);
         System.exit(fail);
+    }
+    /** B-1 시험용 가짜 시계·대기열: postDelayed는 지금+ms에 걸고, runUntil은 그 시각까지 차례로 돌린다 */
+    static final class Sched implements AaReady.Scheduler {
+        long now;
+        int ran;
+        final List<Long> posted = new ArrayList<Long>();
+        final List<Object[]> q = new ArrayList<Object[]>();
+
+        @Override
+        public void postDelayed(Runnable r, long ms) {
+            posted.add(Long.valueOf(ms));
+            q.add(new Object[] { Long.valueOf(now + ms), r });
+        }
+
+        void runUntil(long t) {
+            while (true) {
+                Object[] first = null;
+                for (Object[] e : q) if (first == null || (Long) e[0] < (Long) first[0]) first = e;
+                if (first == null || (Long) first[0] > t) break;
+                q.remove(first);
+                now = (Long) first[0];
+                if (first[1] instanceof AaReady.Recheck) ran++;
+                ((Runnable) first[1]).run();
+            }
+            if (t != Long.MAX_VALUE && now < t) now = t;
+        }
+
+        /** 남은 것을 모두 돌린다(무한 반복이면 10000번에서 멈추고 FAIL). 밖으로 나온 예외 이름, 없으면 null */
+        String runAll(Object unused) {
+            try {
+                for (int n = 0; n < 10000 && !q.isEmpty(); n++) runUntil(earliest());
+                return q.isEmpty() ? null : "never ends";
+            } catch (Throwable t) {
+                return t.getClass().getSimpleName();
+            }
+        }
+
+        long earliest() {
+            long m = Long.MAX_VALUE;
+            for (Object[] e : q) m = Math.min(m, (Long) e[0]);
+            return m;
+        }
     }
 }

@@ -5,5 +5,5 @@
 set -e
 cd "$(dirname "$0")"
 CP=$(mktemp -d); trap 'rm -rf "$CP"' EXIT
-javac --release 8 -Xlint:-options -nowarn -d "$CP" $(find stubs test -name '*.java') ../../src/hmgapi/mods/wireless/AaTurns.java ../../src/hmgapi/mods/wireless/StockLog.java ../../src/hmgapi/mods/wireless/StockReplay.java ../../src/hmgapi/mods/wireless/Mac.java ../../src/hmgapi/mods/wireless/PhoneBar.java ../../src/hmgapi/mods/wireless/TrapArgs.java
+javac --release 8 -Xlint:-options -nowarn -d "$CP" $(find stubs test -name '*.java') ../../src/hmgapi/mods/wireless/AaTurns.java ../../src/hmgapi/mods/wireless/StockLog.java ../../src/hmgapi/mods/wireless/StockReplay.java ../../src/hmgapi/mods/wireless/Mac.java
 java -cp "$CP" hmgapi.mods.wireless.AaTurnsTest
