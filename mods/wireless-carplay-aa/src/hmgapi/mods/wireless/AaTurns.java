@@ -84,7 +84,7 @@ import hmgapi.hook.Cluster;
  *
  * Everything runs on one thread (the handler's), in the order the callbacks came.
  */
-final class AaTurns {
+final class AaTurns implements AaTbt {
     // AA protocol numbers (Protos.NavigationNextTurnEvent)
     static final int UNKNOWN = 0, DEPART = 1, NAME_CHANGE = 2, SLIGHT_TURN = 3, TURN = 4, SHARP_TURN = 5, U_TURN = 6,
             ON_RAMP = 7, OFF_RAMP = 8, FORK = 9, MERGE = 10, ROUNDABOUT_ENTER = 11, ROUNDABOUT_EXIT = 12,
@@ -163,7 +163,7 @@ final class AaTurns {
     boolean focusNative;
 
     /** 포커스가 폰(프로젝션)으로 돌아왔다: 다시 계기판에 보낸다. 기억한 목적지 이름은 바로 다시 보낸다 */
-    void focusPhone() {
+    public void focusPhone() {
         if (!focusNative) return;
         focusNative = false;
         if (navLive && destName != null && destName.length() > 0) sendDestName();
@@ -207,7 +207,7 @@ final class AaTurns {
 
     // ---- from the AA library
 
-    void nextTurn(String str, int side, int ev, int angle, int number) {
+    public void nextTurn(String str, int side, int ev, int angle, int number) {
         if (ev == EV_DUMP) {
             Log.d("NAVDUMP", String.valueOf(str));
             hmgapi.hook.ProjectionHooks.navigationDump(str);   // to mods that asked for projection events (EGMP's route data)
@@ -310,7 +310,7 @@ final class AaTurns {
         sent();
     }
 
-    void nextTurnDistance(int meters, int seconds, int e3, int unitFlags) {
+    public void nextTurnDistance(int meters, int seconds, int e3, int unitFlags) {
         if ((unitFlags & FLAG_AHEAD) != 0) {
             int k = (unitFlags >> 10) & 3;
             if (k > 2) return;
@@ -338,7 +338,7 @@ final class AaTurns {
         sendTurn();
     }
 
-    void status(int s) {
+    public void status(int s) {
         if (s == STATUS_ACTIVE || s == STATUS_REROUTING) {   // 안내 중(재탐색 포함). 순정은 상태를 쓰지 않는다
             navLive = true;
             return;
@@ -375,7 +375,7 @@ final class AaTurns {
      * 1.7.2(M-14): 안내 중이었으면 계기판도 지운다(release, 순정은 운영 상태 2). 경로 자체는 폰에서 이어지므로
      * navLive는 그대로 두어, 포커스가 폰으로 돌아오면 다음 회전부터 다시 보낸다.
      */
-    void stop() {
+    public void stop() {
         boolean was = focusNative;
         focusNative = true;
         if (!was && navLive && !clearedByStop) {
@@ -390,7 +390,7 @@ final class AaTurns {
     }
 
     /** The connection ended: clear what we showed, if a route was on. */
-    void end() {
+    public void end() {
         handler.removeCallbacks(tick);
         if (navLive) status(2);
     }

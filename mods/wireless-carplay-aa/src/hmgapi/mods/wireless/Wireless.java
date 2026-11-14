@@ -14,7 +14,9 @@ package hmgapi.mods.wireless;
 // Korea Projection 1.7.3(2026-11-10, 모드 2.4.1, 계획 A-1): GPM에서 PP가 뜬 뒤(runningPP) 버려진 무선 AA 준비(1)를
 //   한 번 더 보낸다(AaReady). 설정 aa_ready_resend(기본 켬), 패키지 신호 sys.kp.aa_ap=1일 때만.
 // Korea Projection 1.7.4(2026-11-12, 모드 2.4.2, "순정과 똑같이"): 순정 내비 단속 정보 프레임의 막대 칸 바꾸기(TrapBar)와
-//   설정 aa_name_hold를 뺐다. 설정 파일에 옛 aa_name_hold 값이 남아 있어도 읽지 않는다(HMG-API는 모르는 열쇠를 그냥 둔다).
+//   설정 aa_name_hold를 뺐다.
+// Korea Projection 1.7.4(2026-11-15, 모드 2.4.3, 계획 D-20 "순정 상태 + 현대·기아 내비에 맞춘 보정"): 설정 tbt_fit(기본 켬)이면
+//   보정 층(AaTurnsFit·CpTurnsFit, TrapBar)을 쓰고 aa_name_hold를 되살렸다. tbt_fit을 끄면 2.4.2와 같다(AaTurns·CpTurns, 막대 없음).
 
 import android.content.ComponentName;
 import android.content.Context;
@@ -141,6 +143,9 @@ public final class Wireless extends ModEntry {
         if (!mod.settingBoolean("tbt", true)) return;
         final StockLog seen = new StockLog(debug);
         final StockReplay replay = new StockReplay();
+        // 1.7.4(2.4.3): 설정 tbt_fit(기본 켬)이면 폰 막대를 순정 단속 정보 프레임의 막대 칸에 넣는다(없는 차면 null, 나머지는 그대로).
+        // 끄면 2.4.2처럼 단속 정보 프레임에 손대지 않는다
+        final TrapBar trapBar = mod.settingBoolean("tbt_fit", true) ? TrapBar.install(mod, app) : null;
         for (final String m : NAVI_TBT) {
             mod.hook(null, "framework.navigation_cluster." + m, new MethodHook() {
                 @Override
@@ -153,6 +158,14 @@ public final class Wireless extends ModEntry {
                     StockReplay.Out o = replay.call(m, p.thisObject, p.method, p.args, phone, android.os.SystemClock.elapsedRealtime());
                     if (phone) p.setResult(null);
                     resend(mod, o);
+                    // 막대 칸 확인이 실패해도 위의 막기·다시 보내기는 그대로다(리뷰 9)
+                    if (trapBar != null) {
+                        try {
+                            trapBar.check(phone);
+                        } catch (Throwable t) {
+                            // 남기지 않는다(TrapBar가 실패를 한 번 남긴다)
+                        }
+                    }
                     if (o.backupGen != 0) scheduleBackup(mod, app, replay, o.backupGen);
                 }
             });
@@ -363,12 +376,16 @@ public final class Wireless extends ModEntry {
                 if (p.args[3] == Points.get(cl, "gpm.cluster_type.image", null)) p.args[3] = Points.get(cl, "gpm.cluster_type.enum", null);
             }
         });
-        final java.util.Map<Object, AaTurns> turns = new java.util.WeakHashMap<Object, AaTurns>();
+        final java.util.Map<Object, AaTbt> turns = new java.util.WeakHashMap<Object, AaTbt>();
+        // 1.7.4(2.4.3): 설정 tbt_fit(기본 켬)이면 보정 층(AaTurnsFit), 끄면 순정 GPM 그대로(AaTurns, 2.4.2).
+        // aa_name_hold(기본 켬)는 보정 층의 이름 바뀜 붙잡기(1.7.3 A-2)를 쓸지다
+        final boolean fit = mod.settingBoolean("tbt_fit", true);
+        final boolean nameHold = mod.settingBoolean("aa_name_hold", true);
         final android.os.HandlerThread thread = new android.os.HandlerThread("hmgapi-aa-tbt");
         thread.start();
         final android.os.Handler handler = new android.os.Handler(thread.getLooper());
         abstract class OnTurns extends MethodHook {
-            abstract void run(AaTurns t, Object[] a);
+            abstract void run(AaTbt t, Object[] a);
 
             /** receiver: the GalReceiver; create: make its AaTurns if there's none yet */
             void post(final Object receiver, final boolean create, final Object[] args) {
@@ -376,20 +393,21 @@ public final class Wireless extends ModEntry {
                     @Override
                     public void run() {
                         try {
-                            AaTurns t;
+                            AaTbt t;
                             synchronized (turns) {
                                 t = turns.get(receiver);
                                 if (t == null && create) {
                                     hmgapi.hook.Cluster c = hmgapi.hook.Cluster.of(app.context);
                                     if (c == null) return;
-                                    turns.put(receiver, t = new AaTurns(app.context, c, handler));
-                                    t.log = new AaTurns.Sink() {
+                                    AaTurns.Sink sink = new AaTurns.Sink() {
                                         @Override
                                         public void line(String s) {
                                             // the 300-line cap for the whole process, not per connection
                                             if (aaTurnLogs.incrementAndGet() <= AaTurns.TURN_LOGS_MAX) mod.log(s);
                                         }
                                     };
+                                    t = AaTurnsFit.make(fit, nameHold, app.context, c, handler, sink);
+                                    turns.put(receiver, t);
                                     mod.log("Android Auto: turn-by-turn to the cluster for this connection");
                                 }
                             }
@@ -408,25 +426,25 @@ public final class Wireless extends ModEntry {
         }
         mod.hook(cl, "gpm.navigation_status.next_turn", new OnTurns() {
             @Override
-            void run(AaTurns t, Object[] a) {
+            void run(AaTbt t, Object[] a) {
                 t.nextTurn((String) a[0], (Integer) a[1], (Integer) a[2], (Integer) a[4], (Integer) a[5]);
             }
         });
         mod.hook(cl, "gpm.navigation_status.next_turn_distance", new OnTurns() {
             @Override
-            void run(AaTurns t, Object[] a) {
+            void run(AaTbt t, Object[] a) {
                 t.nextTurnDistance((Integer) a[0], (Integer) a[1], (Integer) a[2], (Integer) a[3]);
             }
         });
         mod.hook(cl, "gpm.navigation_status.status", new OnTurns() {
             @Override
-            void run(AaTurns t, Object[] a) {
+            void run(AaTbt t, Object[] a) {
                 t.status((Integer) a[0]);
             }
         });
         mod.hook(cl, "gpm.receiver.send_navigation_focus", new OnTurns() {
             @Override
-            void run(AaTurns t, Object[] a) {
+            void run(AaTbt t, Object[] a) {
                 // 순정으로 가면 지우고 폰 이벤트를 멈춘다. 폰으로 돌아오면 다시 보낸다(1.7.2 M-14, 2차 리뷰 3)
                 if (a[0].equals(Points.get(cl, "gpm.receiver.focus_native", null))) t.stop();
                 else t.focusPhone();
@@ -439,7 +457,7 @@ public final class Wireless extends ModEntry {
         });
         mod.hook(cl, "gpm.receiver.destroy", new OnTurns() {
             @Override
-            void run(AaTurns t, Object[] a) {
+            void run(AaTbt t, Object[] a) {
                 t.end();
                 synchronized (turns) {
                     turns.values().remove(t);

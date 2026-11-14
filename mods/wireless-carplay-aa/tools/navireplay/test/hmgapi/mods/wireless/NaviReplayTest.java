@@ -44,6 +44,8 @@ public final class NaviReplayTest {
         Car.phoneGuidingCalls = 0;
         SystemClock.now += 1000000L;
         mod = new ModContext();
+        // 1.7.4(2.4.3): 이 시험은 보정을 끈 순정 층(2.4.2와 같음)을 본다. 막대(TrapBar)를 켠 쪽은 tools/trapbar가 본다
+        mod.settings.put("tbt_fit", false);
         ctx = new Context();
         ctx.failRegister = failRegister;
         new Wireless().appLoaded(mod, new LoadedApp(Wireless.NAVIGATION, NaviReplayTest.class.getClassLoader(), ctx));
@@ -91,7 +93,7 @@ public final class NaviReplayTest {
     static void install() throws Throwable {
         boot(FakeNav.class, false);
         check("install: Wireless.navigation hooked every stock turn-by-turn point", mod.points.size() == Wireless.NAVI_TBT.length);
-        check("1.7.4: no trap frame hook and no phone bar receiver (bar removed)", Hooks.HOOKED.isEmpty() && ctx.receivers.isEmpty());
+        check("2.4.3 with tbt_fit off: no trap frame hook and no phone bar receiver (as 2.4.2)", Hooks.HOOKED.isEmpty() && ctx.receivers.isEmpty());
         boolean trapHooked = false;
         for (String m : Wireless.NAVI_TBT) if (m.contains("trap")) trapHooked = true;
         check("1.7.4: trap frames are not in the blocked list: cameras and speed limits pass while a phone guides", !trapHooked);
@@ -101,19 +103,22 @@ public final class NaviReplayTest {
         Car.guiding = false;
     }
 
-    /** 1.7.4 끝난 기준 ⑤: 설치된 차에 옛 설정 aa_name_hold(켬/끔)가 남아 있어도 읽지 않고 오류도 없다 */
+    /** 2.4.3: Android Auto 앱 쪽은 tbt_fit·aa_name_hold를 읽고, 어느 값이든 오류 없이 훅을 건다 */
     static void oldSetting() throws Throwable {
-        for (boolean v : new boolean[] { true, false }) {
-            Hooks.HOOKED.clear();
-            Handler.clearAll();
-            mod = new ModContext();
-            mod.settings.put("aa_name_hold", v);
-            mod.settings.put("aa_ap", false);   // 다른 훅(핫스폿 신호)은 이 시험의 가짜 안드로이드에 없어 끈다
-            ctx = new Context();
-            new Wireless().appLoaded(mod, new LoadedApp(Wireless.GPM, NaviReplayTest.class.getClassLoader(), ctx));
-            check("old setting aa_name_hold=" + v + " left on the car: Android Auto app loads, the key is never read, no error",
-                    !mod.asked.contains("aa_name_hold") && mod.asked.contains("tbt") && mod.count("ERROR") == 0
-                            && mod.points.containsKey("gpm.navigation_status.next_turn"));
+        for (boolean fit : new boolean[] { true, false }) {
+            for (boolean hold : new boolean[] { true, false }) {
+                Hooks.HOOKED.clear();
+                Handler.clearAll();
+                mod = new ModContext();
+                mod.settings.put("tbt_fit", fit);
+                mod.settings.put("aa_name_hold", hold);
+                mod.settings.put("aa_ap", false);   // 다른 훅(핫스폿 신호)은 이 시험의 가짜 안드로이드에 없어 끈다
+                ctx = new Context();
+                new Wireless().appLoaded(mod, new LoadedApp(Wireless.GPM, NaviReplayTest.class.getClassLoader(), ctx));
+                check("Android Auto app with tbt_fit=" + fit + " aa_name_hold=" + hold + ": both settings read, hooks set, no error",
+                        mod.asked.contains("tbt_fit") && mod.asked.contains("aa_name_hold") && mod.count("ERROR") == 0
+                                && mod.points.containsKey("gpm.navigation_status.next_turn"));
+            }
         }
     }
 

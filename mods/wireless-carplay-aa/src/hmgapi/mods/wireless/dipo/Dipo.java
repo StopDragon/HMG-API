@@ -58,6 +58,8 @@ public final class Dipo {
     static LoadedApp app;
     static volatile IIap2Service iap2;
     static boolean tbt, bridge;
+    /** 1.7.4(2.4.3): 설정 tbt_fit. 켜면 현대·기아 순정 내비 화면에 맞춘 보정(CpTurnsFit), 끄면 순정 DiPO 그대로(CpTurns) */
+    static boolean fit = true;
     /**
      * Korea Projection의 디버그 로그가 켜졌는지(1.7.2 진단). Wireless가 zygote에서 읽은 값을 start 전에 넣는다
      * (이 부분은 클래스 로더가 달라 Wireless.debug를 직접 읽지 못한다).
@@ -66,7 +68,7 @@ public final class Dipo {
     /** song info on wireless (NowPlaying), see NowPlaying */
     static volatile boolean nowPlaying;
     static Handler turnsHandler;
-    static CpTurns turns;
+    static CpTbt turns;
     static RgListener rg;
     /** set while HMG-API itself calls the iAP2 server (its own route guidance restart) */
     static final ThreadLocal<Boolean> OWN = new ThreadLocal<Boolean>();
@@ -87,6 +89,7 @@ public final class Dipo {
         mod = m;
         app = a;
         tbt = m.settingBoolean("tbt", true);
+        fit = m.settingBoolean("tbt_fit", true);
         bridge = m.settingBoolean("bridge", true);
         nowPlaying = m.settingBoolean("now_playing", true);
         // the CarPlay libraries, patched in memory once DiPO loads them (files stay stock)
@@ -131,18 +134,16 @@ public final class Dipo {
         HandlerThread t = new HandlerThread("hmgapi-cp-tbt");
         t.start();
         turnsHandler = new Handler(t.getLooper());
-        turns = new CpTurns(app.context, c, new Runnable() {
+        Runnable restart = new Runnable() {
             @Override
             public void run() {
                 restartRouteGuidance();
             }
-        });
-        // Korea Projection 1.7.2(차-5 뒤): 디버그 로그가 켜졌으면 곧 회전 판단 진단 줄을 남긴다(CpTurns.diag, 숫자만)
-        turns.debug = debug;
+        };
         // Korea Projection (korea-build): resend the last turn-by-turn about every second while it's
         // on (CpTurns.refresh); the tick ends itself once CpTurns isn't active (state 0, stop, a
         // disconnect, a new source app, or 5 minutes without the phone)
-        turns.onActive = new Runnable() {
+        Runnable onActive = new Runnable() {
             @Override
             public void run() {
                 if (refreshing) return;
@@ -150,6 +151,9 @@ public final class Dipo {
                 turnsHandler.postDelayed(REFRESH, 1000L);
             }
         };
+        // Korea Projection 1.7.4(2.4.3): 설정 tbt_fit(기본 켬)이면 보정 층(CpTurnsFit), 끄면 순정 DiPO 그대로(CpTurns, 2.4.2).
+        // 디버그 로그가 켜졌으면 진단 줄을 남긴다(숫자만)
+        turns = CpTurnsFit.make(fit, app.context, c, restart, onActive, debug);
         rg = new RgListener();
         mod.hook(app.classLoader, "dipo.iap2_proxy.stop_route_guidance", new MethodHook() {
             @Override
@@ -163,7 +167,7 @@ public final class Dipo {
                 });
             }
         });
-        log("CarPlay: turn-by-turn to the cluster (HMG-API's route guidance listener)");
+        log("CarPlay: turn-by-turn to the cluster (HMG-API's route guidance listener, " + (fit ? "fitted to the car navigation" : "stock DiPO only") + ")");
     }
 
     /** whether REFRESH is scheduled (only touched on turnsHandler's thread) */

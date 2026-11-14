@@ -87,7 +87,7 @@ import hmgapi.hook.Cluster;
  * Brazil); on US and Canada cars the build sends every icon.
  * One thread: every call comes from the same handler.
  */
-final class CpTurns {
+final class CpTurns implements CpTbt {
     final Context context;
     final Cluster cluster;
     /** restarts the phone's route guidance updates (Stop, then Start) on a thread of its own */
@@ -181,7 +181,7 @@ final class CpTurns {
     }
 
     /** RouteGuidanceUpdate (DiPO e/u.c) */
-    void routeGuidance(Iap2NotiMsg msg) {
+    public void routeGuidance(Iap2NotiMsg msg) {
         if (msg == null) return;
         phoneAt = now();
         sourceCheck(msg);
@@ -225,7 +225,7 @@ final class CpTurns {
      * Stored under the index the message carries (the build's fix, by Isaac Wisdom: stock
      * wrote the index into a copy and stored every maneuver under -1, so none was found).
      */
-    void maneuver(Iap2NotiMsg msg) {
+    public void maneuver(Iap2NotiMsg msg) {
         if (msg == null) return;
         phoneAt = now();
         int index = -1;
@@ -276,7 +276,7 @@ final class CpTurns {
     }
 
     /** LaneGuidance (the build's applyLanes): up to 8 lanes as the cluster's 0xF1 frame */
-    void lanes(Iap2NotiMsg msg) {
+    public void lanes(Iap2NotiMsg msg) {
         Iap2NotiMsg.Iap2ObjGroup g = msg == null ? null : msg.getItemGroup();
         if (g == null) return;
         int[] status = new int[8], a = new int[8], b = new int[8], c = new int[8];
@@ -515,7 +515,7 @@ final class CpTurns {
     }
 
     /** the iAP2 session ended (DiPO e/u.disconnected) */
-    void disconnected() {
+    public void disconnected() {
         reset();
         recentSources.clear();
         clearTurn();
@@ -524,7 +524,7 @@ final class CpTurns {
     }
 
     /** route guidance stopped (DiPO e/u.nS: the car's navigation took turn-by-turn back, or state 0) */
-    void stop() {
+    public void stop() {
         activeId = null;
         sourceWaitAt = 0L;
         clearTurn();
@@ -553,7 +553,7 @@ final class CpTurns {
      * moment, so the cluster and HUD don't age it out. Stops by itself on state 0 or after
      * REFRESH_MAX_MS without anything from the phone (what's shown is then left to age out).
      */
-    void refresh() {
+    public void refresh() {
         Integer id = activeId;
         if (id == null) return;
         Update u = updates.get(id);
@@ -575,7 +575,7 @@ final class CpTurns {
     }
 
     /** whether refresh() still has something to resend */
-    boolean active() {
+    public boolean active() {
         return activeId != null;
     }
 
