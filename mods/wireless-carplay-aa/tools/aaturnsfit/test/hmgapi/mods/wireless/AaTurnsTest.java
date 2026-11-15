@@ -144,6 +144,8 @@ public final class AaTurnsTest {
                         && "(6 chars)".equals(Mac.mask("iPhone")) && "null".equals(Mac.mask(null)));
         dynamicD();
         sameKindD();
+        staleNextAa();
+        stockSideBitsAa();
         marginD();
         layerChoice();
         System.exit(fail);
@@ -1100,6 +1102,85 @@ public final class AaTurnsTest {
         return x != null && x[0] == disp && x[1] == bar;
     }
 
+    /** 마지막 tbt 줄이 멀리 있음(막대 무효 barErr -1)인지 */
+    static boolean farNow() {
+        String t = last("tbt ");
+        return t != null && Integer.parseInt(t.split(" ")[9]) == -1;
+    }
+
+    /** c.calls에 곧 회전 tbt 줄(barErr 0)이 하나라도 있는지 */
+    static boolean anyNear() {
+        for (String x : c.calls) if (x.startsWith("tbt ") && Integer.parseInt(x.split(" ")[9]) == 0) return true;
+        return false;
+    }
+
+    /** 2.4.4 후보(나): AA 큰 그림의 옆길 비트를 순정 값에 맞춘다(왼쪽 절반 비트 8~14, 방향 칸은 그대로) */
+    static void stockSideBitsAa() {
+        final int LEFT = 1, RIGHT = 2, TURN = 4, SLIGHT = 3, SHARP = 5, ON_RAMP = 7, RB = 13;
+        check("2.4.4 AA stock side bits: left [13, 11, 36], sharp left [13, 9, 30], slight left [13, 13, 42], left on-ramp [13, 13, 42]",
+                java.util.Arrays.toString(AaTurnsFit.nearDisplay(TURN, LEFT, 70, 270)).equals("[13, 11, 36]")
+                        && java.util.Arrays.toString(AaTurnsFit.nearDisplay(SHARP, LEFT, 72, 225)).equals("[13, 9, 30]")
+                        && java.util.Arrays.toString(AaTurnsFit.nearDisplay(SLIGHT, LEFT, 71, 315)).equals("[13, 13, 42]")
+                        && java.util.Arrays.toString(AaTurnsFit.nearDisplay(ON_RAMP, LEFT, 71, 315)).equals("[13, 13, 42]"));
+        check("2.4.4 AA stock side bits: right side unchanged [13, 4, 12], [13, 2, 6], [13, 6, 18]",
+                java.util.Arrays.toString(AaTurnsFit.nearDisplay(TURN, RIGHT, 67, 90)).equals("[13, 4, 12]")
+                        && java.util.Arrays.toString(AaTurnsFit.nearDisplay(SLIGHT, RIGHT, 66, 45)).equals("[13, 2, 6]")
+                        && java.util.Arrays.toString(AaTurnsFit.nearDisplay(SHARP, RIGHT, 68, 135)).equals("[13, 6, 18]"));
+        check("2.4.4 AA stock side bits: roundabout exit 270 deg bit 11 slot 36, 247 deg bit 10 slot 33, 90 deg bit 4 slot 12, 185 deg 8/27",
+                java.util.Arrays.toString(AaTurnsFit.nearDisplay(RB, RIGHT, 195, 270)).equals("[195, 11, 36]")
+                        && java.util.Arrays.toString(AaTurnsFit.nearDisplay(RB, RIGHT, 195, 247)).equals("[195, 10, 33]")
+                        && java.util.Arrays.toString(AaTurnsFit.nearDisplay(RB, RIGHT, 195, 90)).equals("[195, 4, 12]")
+                        && java.util.Arrays.toString(AaTurnsFit.nearDisplay(RB, RIGHT, 195, 185)).equals("[195, 8, 27]"));
+    }
+
+    /**
+     * 2.4.4 후보(카플레이 네이버 지도 깜빡임, 공개 이슈 76번)와 같은 구멍이 AA에 없는지: AA는 회전(이벤트)과 거리(거리 이벤트)가 따로 오고,
+     * 다른 회전이 오면 setTurn이 남은 거리를 -1로 비워 다음 거리 이벤트까지 곧 회전을 판단하지 않는다. 앞 회전의 거리가 새 회전의
+     * 처음 거리로 잡히는 길이 없다는 것을 차 로그와 같은 순서로 본다.
+     */
+    static void staleNextAa() {
+        final int RIGHT = 2, LEFT = 1, METERS = 1, FORK = 9, U_TURN = 6, TURN = 4;
+        Car.unit = Car.DISTANCE_KM;
+        for (boolean hold : new boolean[] { true, false }) {
+            String h = hold ? " (name hold on)" : " (name hold off)";
+            // ① 우회전 15m → 갈림길(다른 회전) → 2000m
+            c = new Cluster();
+            AaTurnsFit t = new AaTurnsFit(new android.content.Context(), c, new Handler());
+            t.nameHold = hold;
+            t.clock = 92000000L;
+            t.status(1);
+            t.nextTurn("Road A", RIGHT, TURN, -1, 0);
+            t.nextTurnDistance(300, 30, 300, METERS);
+            t.nextTurnDistance(15, 1, 15, METERS);
+            check("2.4.4 AA stale next (1)" + h + ": right turn at 15 m: near", !farNow());
+            c.calls.clear();
+            t.clock += 1000L;
+            t.nextTurn("Fork Rd", LEFT, FORK, -1, 0);
+            check("2.4.4 AA stale next (1)" + h + ": a different turn: far until its own distance (old 15 m not used)", farNow() && !anyNear());
+            t.clock += 1000L;
+            t.nextTurnDistance(2000, 200, 2000, METERS);
+            check("2.4.4 AA stale next (1)" + h + ": its distance 2000 m: far, no big picture at any point", farNow() && !anyNear());
+            // ② 좌회전 17m → 유턴 → 380m(카플레이에서 막대 50 → 90으로 뛰던 모양)
+            c = new Cluster();
+            t = new AaTurnsFit(new android.content.Context(), c, new Handler());
+            t.nameHold = hold;
+            t.clock = 93000000L;
+            t.status(1);
+            t.nextTurn("Road A", LEFT, TURN, -1, 0);
+            t.nextTurnDistance(200, 20, 200, METERS);
+            t.nextTurnDistance(17, 1, 17, METERS);
+            c.calls.clear();
+            t.clock += 1000L;
+            t.nextTurn("Back Rd", LEFT, U_TURN, -1, 0);
+            t.clock += 1000L;
+            t.nextTurnDistance(380, 38, 380, METERS);
+            check("2.4.4 AA stale next (2)" + h + ": U-turn, then 380 m: far (no hold, no bar 90)", farNow() && !anyNear());
+            t.nextTurnDistance(350, 35, 350, METERS);
+            check("2.4.4 AA stale next (2)" + h + ": 350 m: near 31, bar 90", db(31, 90));
+        }
+        Car.unit = Car.DISTANCE_MILES;
+    }
+
     /**
      * 2.4.3 D값(소유자 결정 2026-11-15): 이 회전이 안내되기 시작한 뒤 처음 남은 거리가 기준(350m·1050m)보다 짧으면 그 거리가 D.
      * 큰 그림 진입·막대가 같은 D를 쓴다. D_MIN 30m. 시각에 기대지 않는다(거리 순서만).
@@ -1342,9 +1423,9 @@ public final class AaTurnsTest {
                 RB_EXIT = 13, RB_EXIT_ONLY = 12, METERS = 1;
         check("1.7.2 M-12 display: turns 13 (slight/turn/sharp right 6/12/18, left 42/36/30), U-turn 31 (36), exits 17/18, fork 25",
                 java.util.Arrays.toString(AaTurnsFit.nearDisplay(TURN, RIGHT, 67, 90)).equals("[13, 4, 12]")
-                        && java.util.Arrays.toString(AaTurnsFit.nearDisplay(TURN, LEFT, 70, 270)).equals("[13, 12, 36]")
+                        && java.util.Arrays.toString(AaTurnsFit.nearDisplay(TURN, LEFT, 70, 270)).equals("[13, 11, 36]")
                         && java.util.Arrays.toString(AaTurnsFit.nearDisplay(SLIGHT, RIGHT, 66, 30)).equals("[13, 2, 6]")
-                        && java.util.Arrays.toString(AaTurnsFit.nearDisplay(SHARP, LEFT, 69, 225)).equals("[13, 10, 30]")
+                        && java.util.Arrays.toString(AaTurnsFit.nearDisplay(SHARP, LEFT, 69, 225)).equals("[13, 9, 30]")
                         && java.util.Arrays.toString(AaTurnsFit.nearDisplay(U_TURN, LEFT, 72, 270)).equals("[31, -1, 36]")
                         && java.util.Arrays.toString(AaTurnsFit.nearDisplay(OFF_RAMP, RIGHT, 164, 30)).equals("[17, -1, 12]")
                         && java.util.Arrays.toString(AaTurnsFit.nearDisplay(OFF_RAMP, LEFT, 165, 330)).equals("[18, -1, 36]")
@@ -1380,7 +1461,7 @@ public final class AaTurnsTest {
                 "tbt 70 0 0.0 150.0 0 0 0 0 -1".equals(last("tbt ")) && "road []".equals(last("road ")));
         t.nextTurnDistance(600, 40, 600, METERS);
         t.nextTurnDistance(300, 20, 300, METERS);
-        check("review 1: then its own distances: near at 300 m (first 600 m, D 350 m, bar 80)", "tbt 13 4096 270.0 300.0 0 0 0 80 0".equals(last("tbt ")));
+        check("review 1: then its own distances: near at 300 m (first 600 m, D 350 m, bar 80, 2.4.4 bit 11)", "tbt 13 2048 270.0 300.0 0 0 0 80 0".equals(last("tbt ")));
         t.nextTurn("Road A", RIGHT, TURN, -1, 0);
         t.nextTurnDistance(150, 15, 150, METERS);
         c.calls.clear();

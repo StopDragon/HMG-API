@@ -48,6 +48,8 @@ package hmgapi.mods.wireless;
 //   - D를 고정하지 않는다(소유자 결정 2026-11-15): 이 회전이 안내되기 시작할 때의 남은 거리가 350m·1050m보다 짧으면 그 거리를 D로
 //   - 재탐색 뒤 옛 회전(T-6 ①): drafts/1.7.5-reroute.patch의 고침을 넣었다(turnInReroute·distStale·rerouteDue). 4차 리뷰 중간
 //     (거리 낡음 중 첫 출발이 아이콘 0)은 "진짜 거리 없음(distance < 0)만 표시 2로 덮기"로 고쳤다
+// Korea Projection 1.7.4 베타 3(2026-11-15, 모드 2.4.4): 큰 그림 옆길 비트의 왼쪽 절반을 순정 값에 맞췄다(좌회전 칸 36 = 비트 11,
+//   급좌 30 = 9, 약간 좌 42 = 13, 회전교차로 출구도 같은 식. 전에는 칸÷3). 카플레이 CpTurnsFit.streetBit와 같은 규칙
 
 import android.content.Context;
 import android.os.Handler;
@@ -885,6 +887,24 @@ final class AaTurnsFit implements AaTbt {
     }
 
     /**
+     * 각도(시계 방향, 도)의 옆길 비트 번호(순정 SetSideStreetBit, 카플레이 CpTurnsFit.streetBit와 같은 규칙): 직진(348~12도) 0,
+     * 뒤쪽(180도 ±12도) -1, 오른쪽 12~168도는 22.5도 칸마다 비트 1~7, 왼쪽 192~348도는 그 거울로 비트 14~8(270도 = 비트 11).
+     * 2.4.4 후보(나, 니로 순정 줄 side 2065 dir 270): 전에는 "칸÷3"으로 왼쪽 36을 비트 12로 보냈다. 비트 8·9·12~14는 추정
+     */
+    static int streetBit(int cw) {
+        cw = ((cw % 360) + 360) % 360;
+        if (cw >= 348 || cw <= 12) return 0;
+        if (cw > 168 && cw < 192) return -1;
+        if (cw < 180) return Math.min(7, (int) ((cw - 12) / 22.5) + 1);
+        return 15 - Math.min(7, (int) ((360 - cw - 12) / 22.5) + 1);
+    }
+
+    /** 방향 칸(7.5도 단위)의 옆길 비트 번호: 칸이 가리키는 각도로 streetBit(왼쪽 36 = 비트 11, 30 = 9, 42 = 13) */
+    static int slotBit(int slot) {
+        return streetBit((int) (slot * 7.5f));
+    }
+
+    /**
      * 곧 회전 {표시 번호, 나가는 길 옆길 비트 번호(-1: 옆길 없음), 방향 칸} 또는 곧 회전 화면이 없는 회전이면 null. 순정 SetCase*:
      * 회전 13(방향: 약간 6/42, 보통 12/36, 급 18/30, 직진 0), 유턴 31(오른쪽 통행 36), 출구 17/18(12/36), Y자 갈림 25,
      * 회전교차로는 출구 아이콘 그대로(방향은 출구 각도). 방향을 모르는 회전(아이콘 64), 이름 바뀜·출발·목적지·페리는 멀리 있음.
@@ -895,13 +915,13 @@ final class AaTurnsFit implements AaTbt {
                 if (side != LEFT && side != RIGHT) return null;
                 int slot = ev == SLIGHT_TURN ? 6 : ev == TURN ? 12 : 18;
                 if (side == LEFT) slot = 48 - slot;
-                return new int[] { NEAR_TURN, slot / 3, slot };
+                return new int[] { NEAR_TURN, slotBit(slot), slot };
             }
             case STRAIGHT: case MERGE:
                 return new int[] { NEAR_TURN, 0, 0 };
             case ON_RAMP: {
                 int slot = side == RIGHT ? 6 : side == LEFT ? 42 : 0;
-                return new int[] { NEAR_TURN, slot / 3, slot };
+                return new int[] { NEAR_TURN, slotBit(slot), slot };
             }
             case U_TURN:
                 return new int[] { NEAR_UTURN, -1, side == RIGHT ? 12 : 36 };
@@ -922,8 +942,8 @@ final class AaTurnsFit implements AaTbt {
                     bit = cw <= 179 ? 7 : 8;
                     slot = cw <= 179 ? 21 : 27;
                 } else {
-                    bit = Math.min(15, (int) ((cw - 12) / 22.5) + 1);
-                    slot = 3 * bit;
+                    bit = streetBit(cw);
+                    slot = bit <= 7 ? 3 * bit : 3 * (bit + 1);
                 }
                 return new int[] { displayType, bit, slot };
             }

@@ -216,6 +216,7 @@ public final class CpTurnsTest {
         h.maneuver(maneuver(2, 3, 0, 0, 0, "R3", 900));
         h.routeGuidance(msg(0, U16, i(1), 1, ENUM, i(1), 10, U32, i(500), 11, STR, s("500"), 12, ENUM, i(2), 13, U16, i(0, 1, 2)));
         check("2.3.0 2C three points: 500 m, 800 m, 1.7 km", only2c().equals("2c 0 0 500 0 0 800 1 7 1"));
+        // 2.4.4 후보(4차 리뷰 중간 1): 500m → 800m는 받으면 멀리 있음이라 붙잡지 않고 바로 보낸다
         h.routeGuidance(msg(0, U16, i(1), 10, U32, i(800), 11, STR, s("0.8"), 12, ENUM, i(0)));
         check("2.3.0 2C under 1 km in m (the phone said 0.8 km): 800 m, 1.1 km, 2.0 km",
                 only2c().equals("2c 0 0 800 1 1 1 1 0 2"));
@@ -417,7 +418,11 @@ public final class CpTurnsTest {
         t.routeGuidance(rgAt(1, 100));
         check("2.4.3 CarPlay D (5): 100 m: bar 50 (D 200 m)", db(13, 50));
         t.routeGuidance(rgAt(1, 300));
+        // 2.4.4 후보: 100m → 300m(뜀)는 한 번 붙잡는다(앞 프레임 막대 50 그대로). 다음 갱신에서 2.4.3처럼 D가 300m로 는다
+        check("2.4.4 CarPlay D (5): back to 300 m: held once, the bar-50 frame stays", db(13, 50) && "jump-hold".equals(t.nearWhy));
+        t.routeGuidance(rgAt(1, 300));
         check("2.4.3 CarPlay D (5): back to 300 m: D grows to 300 m, still near, bar 90", db(13, 90));
+        // 4차 리뷰 중간 1: 300m → 600m는 받으면 멀리 있음이라 붙잡지 않는다
         t.routeGuidance(rgAt(1, 600));
         check("2.4.3 CarPlay D (5): 600 m: D 350 m (base), far", db(67, 0));
         // ⑥ 재탐색(상태 5) 뒤: 처음 거리로 다시
@@ -439,6 +444,882 @@ public final class CpTurnsTest {
         t.maneuver(nearManeuver(0, 2, 0, 0, 90, null, -1, "Road"));
         t.routeGuidance(rgAt(1, 10));
         check("2.4.3 CarPlay D (7): first seen at 10 m: D 30 m, bar 30", db(13, 30));
+        Car.unit = Car.DISTANCE_MILES;
+    }
+
+    /** 마지막 tbt 줄이 멀리 있음(막대 무효 barErr -1)인지 */
+    static boolean farNow() {
+        String t = last("tbt ");
+        return t != null && Integer.parseInt(t.split(" ")[9]) == -1;
+    }
+
+    /** c.calls에 멀리 있음 tbt 줄(barErr -1)이 하나라도 있는지 */
+    static boolean farAny() {
+        for (String x : c.calls) if (x.startsWith("tbt ") && Integer.parseInt(x.split(" ")[9]) == -1) return true;
+        return false;
+    }
+
+    /** c.calls에 곧 회전 tbt 줄(barErr 0)이 하나라도 있는지 */
+    static boolean anyNear() {
+        for (String x : c.calls) if (x.startsWith("tbt ") && Integer.parseInt(x.split(" ")[9]) == 0) return true;
+        return false;
+    }
+
+    /**
+     * 2.4.4 후보(베타 3, 공개 이슈 76번 2026-11-15 쏘렌토 MQ4 하이브리드·네이버 지도): 네이버 지도는 회전이 바뀌는 갱신에
+     * item 10을 앞 회전의 남은 거리 그대로 넣는다. 그 값을 새 회전의 처음 거리로 잡으면 D가 바닥 30m가 되어 큰 그림이 약 1초 나간다.
+     */
+    static void staleNext() {
+        Car.unit = Car.DISTANCE_KM;
+        // ① 차 로그 09:11:57: 앞 회전 15m → 새 회전(Y자 13)의 첫 갱신 15m(앞 값) → 다음 갱신 2000m
+        c = new Cluster();
+        CpTurnsFit t = new CpTurnsFit(new android.content.Context(), c, null);
+        t.clock = 17600000L;
+        t.maneuver(nearManeuver(0, 2, 0, 0, 90, null, -1, "Right Rd"));
+        t.maneuver(nearManeuver(1, 13, 0, 0, 0, null, -1, "Fork Rd"));
+        t.routeGuidance(rgAtIdx(1, 300, 0));
+        t.routeGuidance(rgAtIdx(1, 15, 0));
+        check("2.4.4 stale next (1): the right turn at 15 m: near", !farNow());
+        c.calls.clear();
+        t.routeGuidance(rgAtIdx(1, 15, 1));
+        check("2.4.4 stale next (1): new turn whose first distance is the old turn's last 15 m: far, decision put off (put-off)",
+                farNow() && !anyNear() && "put-off".equals(t.nearWhy));
+        t.routeGuidance(rgAtIdx(1, 2000, 1));
+        check("2.4.4 stale next (1): the real 2000 m next: far, no big picture at any point", farNow() && !anyNear());
+        t.routeGuidance(rgAtIdx(1, 350, 1));
+        check("2.4.4 stale next (1): 350 m: near 25, bar 90 (D 350 m)", db(25, 90));
+        // ② 차 로그 11:39:30 유턴: 17m → 380m(막대 50 → 90으로 뛰던 줄)
+        c = new Cluster();
+        t = new CpTurnsFit(new android.content.Context(), c, null);
+        t.clock = 17700000L;
+        t.maneuver(nearManeuver(0, 1, 0, 0, -90, null, -1, "Left Rd"));
+        t.maneuver(nearManeuver(1, 4, 0, 0, 180, null, -1, "Back Rd"));
+        t.routeGuidance(rgAtIdx(1, 200, 0));
+        t.routeGuidance(rgAtIdx(1, 17, 0));
+        c.calls.clear();
+        t.routeGuidance(rgAtIdx(1, 17, 1));
+        check("2.4.4 stale next (2): U-turn whose first distance is the old 17 m: far", farNow() && !anyNear());
+        t.routeGuidance(rgAtIdx(1, 380, 1));
+        check("2.4.4 stale next (2): the real 380 m: far (not hold with bar 90)", farNow() && !anyNear());
+        t.routeGuidance(rgAtIdx(1, 350, 1));
+        check("2.4.4 stale next (2): 350 m: near 31, bar 90", db(31, 90));
+        // ③ 진짜로 바로 붙은 회전: 같은 값이 한 번 더 오면 받아들인다(영원히 미루지 않음)
+        c = new Cluster();
+        t = new CpTurnsFit(new android.content.Context(), c, null);
+        t.clock = 17800000L;
+        t.maneuver(nearManeuver(0, 2, 0, 0, 90, null, -1, "Right Rd"));
+        t.maneuver(nearManeuver(1, 1, 0, 0, -90, null, -1, "Left Rd"));
+        t.routeGuidance(rgAtIdx(1, 100, 0));
+        t.routeGuidance(rgAtIdx(1, 15, 0));
+        t.routeGuidance(rgAtIdx(1, 15, 1));
+        check("2.4.4 stale next (3): first 15 m on the new turn: put off", farNow());
+        t.routeGuidance(rgAtIdx(1, 15, 1));
+        check("2.4.4 stale next (3): the same 15 m again: taken, near, D 30 m bar 50", db(13, 50));
+        // ③' 다음 갱신이 더 짧아도(차가 다가감) 받아들인다: 미루기는 회전마다 한 번
+        c = new Cluster();
+        t = new CpTurnsFit(new android.content.Context(), c, null);
+        t.clock = 17850000L;
+        t.maneuver(nearManeuver(0, 2, 0, 0, 90, null, -1, "Right Rd"));
+        t.maneuver(nearManeuver(1, 1, 0, 0, -90, null, -1, "Left Rd"));
+        t.routeGuidance(rgAtIdx(1, 100, 0));
+        t.routeGuidance(rgAtIdx(1, 20, 0));
+        t.routeGuidance(rgAtIdx(1, 20, 1));
+        t.routeGuidance(rgAtIdx(1, 12, 1));
+        check("2.4.4 stale next (3'): put off once, then 12 m: near, D 30 m bar 40", db(13, 40));
+        // ③'' 미루는 사이 거리 없는 갱신(item 10 없음)이 와도 새 거리가 오면 받아들인다
+        c = new Cluster();
+        t = new CpTurnsFit(new android.content.Context(), c, null);
+        t.clock = 17870000L;
+        t.maneuver(nearManeuver(0, 2, 0, 0, 90, null, -1, "Right Rd"));
+        t.maneuver(nearManeuver(1, 1, 0, 0, -90, null, -1, "Left Rd"));
+        t.routeGuidance(rgAtIdx(1, 100, 0));
+        t.routeGuidance(rgAtIdx(1, 15, 0));
+        t.routeGuidance(rgAtIdx(1, 15, 1));
+        t.routeGuidance(msg(0, U16, i(1), 1, ENUM, i(1), 11, STR, s("15"), 12, ENUM, i(2), 13, U16, i(1)));
+        check("2.4.4 stale next (3''): no item 10 in between: still far (stale-dist)", farNow() && "stale-dist".equals(t.nearWhy));
+        t.routeGuidance(rgAtIdx(1, 15, 1));
+        check("2.4.4 stale next (3''): item 10 again: taken, near bar 50", db(13, 50));
+        // ④ 새 회전의 처음 거리가 앞 회전의 마지막보다 길면 미루지 않는다(① D 시험과 같은 경우: 40m → 100m 바로 곧 회전)
+        c = new Cluster();
+        t = new CpTurnsFit(new android.content.Context(), c, null);
+        t.clock = 17900000L;
+        t.maneuver(nearManeuver(0, 1, 0, 0, -90, null, -1, "Left Rd"));
+        t.maneuver(nearManeuver(1, 2, 0, 0, 90, null, -1, "Right Rd"));
+        t.routeGuidance(rgAtIdx(1, 40, 0));
+        t.routeGuidance(rgAtIdx(1, 41, 1));
+        check("2.4.4 stale next (4): new turn first 41 m > old last 40 m: near at once, bar 90", db(13, 90));
+        // ⑤ 재탐색 뒤 첫 회전은 앞 경로의 마지막 거리와 견주지 않는다(D 시험 ⑥: 300m → 재탐색 → 120m 바로 곧 회전)
+        c = new Cluster();
+        t = new CpTurnsFit(new android.content.Context(), c, null);
+        t.clock = 17950000L;
+        t.maneuver(nearManeuver(0, 2, 0, 0, 90, null, -1, "Road"));
+        t.routeGuidance(rgAt(1, 300));
+        t.routeGuidance(rgAt(5, 300));
+        t.maneuver(nearManeuver(3, 1, 0, 0, -90, null, -1, "New Rd"));
+        t.routeGuidance(rgAtIdx(1, 120, 3));
+        check("2.4.4 stale next (5): after rerouting, a new turn at 120 m (< old 300 m): near at once, bar 90", db(13, 90));
+        // ⑥ 같은 회전 번호에서 종류만 바뀜(폰이 회전 정보를 고쳐 보냄): 회전이 바뀐 것이 아니므로 미루지 않는다(멀리 있음이 끼면 반대로 깜빡임)
+        c = new Cluster();
+        t = new CpTurnsFit(new android.content.Context(), c, null);
+        t.clock = 17980000L;
+        t.maneuver(nearManeuver(0, 2, 0, 0, 90, null, -1, "Right Rd"));
+        t.routeGuidance(rgAt(1, 300));
+        t.routeGuidance(rgAt(1, 150));
+        check("2.4.4 stale next (6): right turn at 150 m: near", db(13, 50));
+        c.calls.clear();
+        t.maneuver(nearManeuver(0, 4, 0, 0, 180, null, -1, "Right Rd"));
+        t.routeGuidance(rgAt(1, 140));
+        check("2.4.4 stale next (6): same maneuver index, type changed to U-turn at 140 m: near at once, no far frame", db(31, 90) && !farAny());
+        Car.unit = Car.DISTANCE_MILES;
+    }
+
+    /** c.calls의 tbt 줄 수 */
+    static int tbtCount() {
+        int n = 0;
+        for (String x : c.calls) if (x.startsWith("tbt ")) n++;
+        return n;
+    }
+
+    /**
+     * 2.4.4 후보 재설계: 카카오내비 순서(니로 차 로그 2026-11-15 베타 2, logs/2026-11-15-niro-1.7.4-beta.2/3-log.txt 14:01~14:04).
+     * 회전이 바뀔 때 새 회전의 거리가 옛 회전 번호로 먼저 오고, 30~130ms 뒤에 새 번호가 같은 거리로 온다(네이버 지도와 반대).
+     * 문제 1: 앞 값 미루기가 이 새 번호를 미뤄 멀리 있음이 낀다. 문제 2: 지난 회전 그림이 새 거리의 막대로 한 번 나간다.
+     */
+    static void kakaoOrder() {
+        Car.unit = Car.DISTANCE_KM;
+        c = new Cluster();
+        CpTurnsFit t = new CpTurnsFit(new android.content.Context(), c, null);
+        t.clock = 19500000L;
+        t.maneuver(nearManeuver(3, 2, 0, 0, 90, null, -1, "R3"));
+        t.maneuver(nearManeuver(6, 1, 0, 0, -90, null, -1, "L6"));
+        t.maneuver(nearManeuver(9, 1, 0, 0, -90, null, -1, "L9"));
+        t.maneuver(nearManeuver(12, 1, 0, 0, -90, null, -1, "L12"));
+        t.maneuver(nearManeuver(14, 10, 0, 0, 0, null, -1, "Dest"));
+        t.routeGuidance(rgAtIdx(1, 36, 3));
+        t.clock += 1000L;
+        t.routeGuidance(rgAtIdx(1, 10, 3));
+        check("2.4.4 Kakao 14:01:36.180: right turn 3 at 10 m: near bar 20 (D 36 m)", db(13, 20));
+        // 14:01:36.220 옛 번호 3 + 새 거리 274m
+        c.calls.clear();
+        t.clock += 40L;
+        t.routeGuidance(rgAtIdx(1, 274, 3));
+        check("2.4.4 Kakao 14:01:36.220: turn 3 with the next turn's 274 m: the right-turn picture not redrawn with bar 90 (frame kept)",
+                tbtCount() == 0 && "jump-hold".equals(t.nearWhy));
+        // 14:01:36.350 새 번호 6 + 같은 274m
+        t.clock += 130L;
+        t.routeGuidance(rgAtIdx(1, 274, 6));
+        check("2.4.4 Kakao 14:01:36.350: turn 6 at 274 m: near at once (left, bar 90, D 274 m), no far frame", db(13, 90) && !farAny());
+        t.clock += 1000L;
+        t.routeGuidance(rgAtIdx(1, 242, 6));
+        check("2.4.4 Kakao 14:01:40: 242 m: bar 80 (D 274 m)", db(13, 80));
+        t.clock += 1000L;
+        t.routeGuidance(rgAtIdx(1, 4, 6));
+        check("2.4.4 Kakao 14:02:02.170: 4 m: bar 10", db(13, 10));
+        c.calls.clear();
+        t.clock += 20L;
+        t.routeGuidance(rgAtIdx(1, 485, 6));
+        // 4차 리뷰 중간 1: 받아들이면 멀리 있음이 될 뛴 값은 붙잡지 않고 바로 보낸다(HEAD와 같은 바른 출력)
+        check("2.4.4 Kakao 14:02:02.190: turn 6 with 485 m (far if taken): sent at once as far, no bar redraw", tbtCount() == 1 && farNow()
+                && !anyNear());
+        t.clock += 100L;
+        t.routeGuidance(rgAtIdx(1, 485, 9));
+        check("2.4.4 Kakao 14:02:02.290: turn 9 at 485 m: far (D 350 m), no near frame of turn 6", farNow() && !anyNear());
+        t.clock += 1000L;
+        t.routeGuidance(rgAtIdx(1, 1, 9));
+        check("2.4.4 Kakao 14:04:20.620: turn 9 at 1 m: near bar 10", db(13, 10));
+        c.calls.clear();
+        t.clock += 20L;
+        t.routeGuidance(rgAtIdx(1, 297, 9));
+        t.clock += 140L;
+        t.routeGuidance(rgAtIdx(1, 297, 12));
+        check("2.4.4 Kakao 14:04:20.640-.780: 297 m kept, then turn 12 at 297 m: one near frame, bar 90 (D 297 m), no bar 80 of turn 9",
+                tbtCount() == 1 && db(13, 90) && !farAny());
+        t.clock += 1000L;
+        t.routeGuidance(rgAtIdx(1, 1, 12));
+        c.calls.clear();
+        t.clock += 50L;
+        t.routeGuidance(rgAtIdx(1, 200, 12));
+        t.clock += 60L;
+        t.routeGuidance(rgAtIdx(1, 200, 14));
+        check("2.4.4 Kakao 14:04:58.670-.780: 200 m kept, then the destination (type 10) far, no bar 60 of turn 12",
+                tbtCount() == 1 && farNow() && !anyNear());
+        Car.unit = Car.DISTANCE_MILES;
+    }
+
+    /** 카카오 순서 시험의 시작: 우회전 3을 36m → 10m까지(곧 회전, 막대 20) */
+    static CpTurnsFit kakaoAt10(long clock) {
+        c = new Cluster();
+        CpTurnsFit t = new CpTurnsFit(new android.content.Context(), c, null);
+        t.clock = clock;
+        t.maneuver(nearManeuver(3, 2, 0, 0, 90, null, -1, "R3"));
+        t.maneuver(nearManeuver(6, 1, 0, 0, -90, null, -1, "L6"));
+        t.maneuver(nearManeuver(9, 1, 0, 0, -90, null, -1, "L9"));
+        t.routeGuidance(msg(0, U16, i(1), 1, ENUM, i(1), 10, U32, i(36), 11, STR, s("36"), 12, ENUM, i(2), 13, U16, i(3, 6, 9)));
+        t.clock += 1000L;
+        t.routeGuidance(msg(0, U16, i(1), 1, ENUM, i(1), 10, U32, i(10), 11, STR, s("10"), 12, ENUM, i(2), 13, U16, i(3, 6, 9)));
+        return t;
+    }
+
+    /** 2.4.4 후보 재설계: 붙잡기의 refresh·재탐색·HUD·item 10 없는 번호 갱신 */
+    static void kakaoOrderMore() {
+        Car.unit = Car.DISTANCE_KM;
+        // HUD: 붙잡는 갱신은 2C도 보내지 않고, 새 번호에서 274m + 다음 구간 500m
+        CpTurnsFit t = kakaoAt10(19600000L);
+        check("2.4.4 Kakao HUD: before: 2C 10 m, 510 m", last("2c ").startsWith("2c 0 0 10 0 0 510 "));
+        c.calls.clear();
+        t.clock += 40L;
+        t.routeGuidance(msg(0, U16, i(1), 1, ENUM, i(1), 10, U32, i(274), 11, STR, s("274"), 12, ENUM, i(2), 13, U16, i(3, 6, 9)));
+        check("2.4.4 Kakao HUD: held: nothing sent (no tbt, no 2C, no HUD list)", c.calls.isEmpty());
+        t.clock += 130L;
+        t.routeGuidance(msg(0, U16, i(1), 1, ENUM, i(1), 10, U32, i(274), 11, STR, s("274"), 12, ENUM, i(2), 13, U16, i(6, 9)));
+        check("2.4.4 Kakao HUD: turn 6: 2C 274 m, 774 m; near bar 90", last("2c ").startsWith("2c 0 0 274 0 0 774 ") && db(13, 90));
+        // refresh가 REFRESH_MS 안이면 붙잡기를 풀지 않는다(lastSendAt)
+        t = kakaoAt10(19700000L);
+        c.calls.clear();
+        t.clock += 40L;
+        t.routeGuidance(rgAtIdx(1, 274, 3));
+        t.clock += 100L;
+        t.refresh();
+        check("2.4.4 Kakao refresh 100 ms after the hold: nothing resent", tbtCount() == 0);
+        t.clock += 30L;
+        t.routeGuidance(rgAtIdx(1, 274, 6));
+        check("2.4.4 Kakao refresh: then turn 6: near bar 90, no far", db(13, 90) && !farAny());
+        // 새 번호가 1초 넘게 늦으면 refresh가 붙잡기를 풀어 2.4.3처럼 D를 늘려 받아들인다(지난 회전 그림 bar 90, 알려진 한계).
+        // 그 뒤 새 번호가 같은 값으로 오면 앞 회전의 마지막 값이 뛴 값이므로 미루지 않는다
+        t = kakaoAt10(19800000L);
+        c.calls.clear();
+        t.clock += 40L;
+        t.routeGuidance(rgAtIdx(1, 274, 3));
+        t.clock += 1000L;
+        t.refresh();
+        check("2.4.4 Kakao late number: refresh 1 s later takes the jump on the same turn (D 274 m, bar 90, right turn)", db(13, 90)
+                && last("tbt ").contains(" 90.0 274.0 "));
+        c.calls.clear();
+        t.clock += 300L;
+        t.routeGuidance(rgAtIdx(1, 270, 6));
+        check("2.4.4 Kakao late number: turn 6 at 270 m: near at once, left (dir 270), not put off against the jumped 274 m",
+                db(13, 90) && !farAny() && last("tbt ").split(" ")[3].equals("270.0"));
+        // 되돌아감(새 번호가 오지 않음): 다음 갱신에서 받아들인다(영원히 붙잡지 않음)
+        t = kakaoAt10(19900000L);
+        t.clock += 40L;
+        t.routeGuidance(rgAtIdx(1, 274, 3));
+        t.clock += 1000L;
+        t.routeGuidance(rgAtIdx(1, 270, 3));
+        check("2.4.4 Kakao no new turn: the next update takes it (D 274 m, bar 90)", db(13, 90) && !"jump-hold".equals(t.nearWhy));
+        t.clock += 1000L;
+        t.routeGuidance(rgAtIdx(1, 137, 3));
+        check("2.4.4 Kakao no new turn: 137 m: bar 50 (D 274 m)", db(13, 50));
+        // 새 번호 갱신에 item 10이 없어도 붙잡은 값(새 회전의 거리)으로 받는다
+        t = kakaoAt10(20000000L);
+        t.clock += 40L;
+        t.routeGuidance(rgAtIdx(1, 274, 3));
+        c.calls.clear();
+        t.clock += 100L;
+        t.routeGuidance(msg(0, U16, i(1), 1, ENUM, i(1), 11, STR, s("274"), 12, ENUM, i(2), 13, U16, i(6)));
+        check("2.4.4 Kakao number without item 10 right after the hold: taken (near bar 90), not stale-dist", db(13, 90) && !farAny());
+        // 재탐색·안내 끝·이름 돌아옴(nearForget)은 붙잡은 값을 버린다: 그 뒤 item 10 없는 새 번호는 stale-dist(멀리 있음)
+        t = kakaoAt10(20100000L);
+        t.clock += 40L;
+        t.routeGuidance(rgAtIdx(1, 274, 3));
+        t.clock += 100L;
+        t.routeGuidance(rgAtIdx(5, 274, 3));
+        t.clock += 1000L;
+        t.routeGuidance(msg(0, U16, i(1), 1, ENUM, i(1), 11, STR, s("274"), 12, ENUM, i(2), 13, U16, i(6)));
+        check("2.4.4 Kakao: rerouting forgets the held value: a new turn without item 10 afterwards is stale-dist (far)",
+                farNow() && "stale-dist".equals(t.nearWhy));
+        t = kakaoAt10(20200000L);
+        t.clock += 40L;
+        t.routeGuidance(rgAtIdx(1, 274, 3));
+        t.stop();
+        t.clock += 1000L;
+        t.routeGuidance(msg(0, U16, i(1), 1, ENUM, i(1), 11, STR, s("274"), 12, ENUM, i(2), 13, U16, i(6)));
+        check("2.4.4 Kakao: the guidance stopped forgets the held value too", farNow() && "stale-dist".equals(t.nearWhy));
+        // GPS 흔들림(같은 회전 150 → 165 → 140m)은 붙잡지 않는다
+        c = new Cluster();
+        t = new CpTurnsFit(new android.content.Context(), c, null);
+        t.clock = 20300000L;
+        t.maneuver(nearManeuver(0, 2, 0, 0, 90, null, -1, "Road"));
+        t.routeGuidance(rgAt(1, 200));
+        t.routeGuidance(rgAt(1, 150));
+        c.calls.clear();
+        t.routeGuidance(rgAt(1, 165));
+        check("2.4.4: wobble 150 -> 165 m: not held (frame sent, D 200 m, bar 80)", tbtCount() == 1 && db(13, 80));
+        t.routeGuidance(rgAt(1, 20));
+        c.calls.clear();
+        t.routeGuidance(rgAt(1, 35));
+        check("2.4.4: right at the turn 20 -> 35 m (rise 15 <= 20): not held", tbtCount() == 1);
+        // 네이버 지도 순서는 그대로 미룬다(앞 회전 마지막 값이 뛴 값이 아님)
+        t = afterTurn0(20400000L, 13, 15);
+        t.clock += 1000L;
+        t.routeGuidance(rgAtIdx(1, 15, 1));
+        check("2.4.4 Naver order still put off after the redesign", farNow() && "put-off".equals(t.nearWhy));
+        Car.unit = Car.DISTANCE_MILES;
+    }
+
+    /** 우회전 3을 36m부터 거리 차례로 보낸 관리자(1초 간격, 회전 6·9 있음) */
+    static CpTurnsFit turn3(long clock, int... ms) {
+        c = new Cluster();
+        CpTurnsFit t = new CpTurnsFit(new android.content.Context(), c, null);
+        t.clock = clock;
+        t.maneuver(nearManeuver(3, 2, 0, 0, 90, null, -1, "R3"));
+        t.maneuver(nearManeuver(6, 1, 0, 0, -90, null, -1, "L6"));
+        t.maneuver(nearManeuver(9, 1, 0, 0, -90, null, -1, "L9"));
+        for (int m : ms) {
+            t.routeGuidance(rgAtIdx(1, m, 3));
+            t.clock += 1000L;
+        }
+        return t;
+    }
+
+    /** 2.4.4 후보 재설계 3차 리뷰(중간 3·낮음 6) 반영 시험 */
+    static void redesignReview() {
+        Car.unit = Car.DISTANCE_KM;
+        // 중간 1: 카카오 순서에서 다음 회전이 가까움(오름 18m, 붙잡기 문턱 20 이하): 3@10 → 3@28 → 6@28. 6@28을 미루지 않는다
+        CpTurnsFit t = turn3(21000000L, 36, 10);
+        t.routeGuidance(rgAtIdx(1, 28, 3));
+        check("2.4.4 3rd review M1: 3@10 -> 3@28 (rise 18 m): not held, the old picture redrawn (bar 70, as before)", db(13, 70));
+        c.calls.clear();
+        t.clock += 100L;
+        t.routeGuidance(rgAtIdx(1, 28, 6));
+        check("2.4.4 3rd review M1: then 6@28: near at once (left, D 30 m), not put off", db(13, 90) && !farAny()
+                && last("tbt ").split(" ")[3].equals("270.0"));
+        // 경계: 10 → 30m(오름 20, 붙잡지 않음)와 10 → 31m(붙잡음) 모두 새 회전은 바로 큰 그림
+        t = turn3(21100000L, 36, 10);
+        t.routeGuidance(rgAtIdx(1, 30, 3));
+        t.clock += 100L;
+        c.calls.clear();
+        t.routeGuidance(rgAtIdx(1, 30, 6));
+        check("2.4.4 3rd review M1 edge: 3@10 -> 3@30 -> 6@30: near at once", db(13, 90) && !farAny());
+        t = turn3(21150000L, 36, 10, 31);
+        c.calls.clear();
+        t.routeGuidance(rgAtIdx(1, 31, 6));
+        check("2.4.4 3rd review M1 edge: 3@10 -> 3@31 (held) -> 6@31: near at once", db(13, 90) && !farAny());
+        // 경계: 35 → 135m(오름 100, 붙잡지 않음) → 6@135: 바로 큰 그림
+        t = turn3(21200000L, 300, 35);
+        t.routeGuidance(rgAtIdx(1, 135, 3));
+        t.clock += 100L;
+        c.calls.clear();
+        t.routeGuidance(rgAtIdx(1, 135, 6));
+        check("2.4.4 3rd review M1 edge: 3@35 -> 3@135 -> 6@135: near at once (D 135 m, bar 90)", db(13, 90) && !farAny());
+        // 네이버의 묵은 값(앞 값과 같음)은 늘어난 값이 아니므로 그대로 미룬다
+        t = turn3(21250000L, 300, 15);
+        t.routeGuidance(rgAtIdx(1, 15, 6));
+        check("2.4.4 3rd review M1: Naver stale (same as the last) still put off", farNow() && "put-off".equals(t.nearWhy));
+        // 붙잡기 문턱 경계(같은 회전): 앞 값 30m 이하에서 오름 20m는 붙잡지 않고 21m는 붙잡음. 앞 값 31m에서 오름 21m는 붙잡지 않음.
+        // 어디서든 오름 100m는 붙잡지 않고 101m는 붙잡음
+        int[][] edge = { { 10, 30, 0 }, { 10, 31, 1 }, { 30, 51, 1 }, { 31, 52, 0 }, { 200, 300, 0 }, { 200, 301, 1 } };
+        for (int[] e : edge) {
+            t = turn3(21300000L, 350, e[0]);
+            c.calls.clear();
+            t.routeGuidance(rgAtIdx(1, e[1], 3));
+            boolean held = tbtCount() == 0;
+            check("2.4.4 3rd review edge: " + e[0] + " -> " + e[1] + " m on the same turn: " + (e[2] == 1 ? "held" : "not held"),
+                    held == (e[2] == 1) && ("jump-hold".equals(t.nearWhy)) == (e[2] == 1));
+        }
+        // 중간 2: 새 회전의 진짜 첫 거리가 앞 회전 마지막과 같음(0@20 → 1@20, 5차 리뷰 뒤 미루는 것은 같은 값뿐), 정차(item 10 없는 갱신·refresh만)
+        t = afterTurn0(21400000L, 1, 20);
+        t.routeGuidance(rgAtIdx(1, 20, 1));
+        check("2.4.4 3rd review M2: 0@20 -> 1@20: put off", farNow() && "put-off".equals(t.nearWhy));
+        t.clock += 1000L;
+        t.refresh();
+        check("2.4.4 3rd review M2: stopped, refresh 1 s later: still far (first refresh does not release)", farNow());
+        t.clock += 1000L;
+        t.refresh();
+        check("2.4.4 3rd review M2: stopped, refresh 2 s after the put-off: the put-off 20 m taken (near, D 30 m, bar 60)", db(13, 60));
+        // 중간 2: item 10 없는 갱신만 오는 정차도 한도 뒤에 풀린다
+        t = afterTurn0(21500000L, 1, 20);
+        t.routeGuidance(rgAtIdx(1, 20, 1));
+        t.clock += 1000L;
+        t.routeGuidance(msg(0, U16, i(1), 1, ENUM, i(1), 11, STR, s("20"), 12, ENUM, i(2), 13, U16, i(1)));
+        check("2.4.4 3rd review M2: update without item 10 1 s later: still far", farNow() && "stale-dist".equals(t.nearWhy));
+        t.clock += 1000L;
+        t.routeGuidance(msg(0, U16, i(1), 1, ENUM, i(1), 11, STR, s("20"), 12, ENUM, i(2), 13, U16, i(1)));
+        check("2.4.4 3rd review M2: update without item 10 2 s later: taken (bar 60)", db(13, 60));
+        // 네이버 순서(15m → 약 1초 뒤 2000m)는 한도와 상관없이 막힌다: refresh가 1초에 끼어도
+        t = afterTurn0(21600000L, 13, 15);
+        c.calls.clear();
+        t.routeGuidance(rgAtIdx(1, 15, 1));
+        t.clock += 900L;
+        t.refresh();
+        t.clock += 60L;
+        t.routeGuidance(rgAtIdx(1, 2000, 1));
+        t.clock += 1000L;
+        t.refresh();
+        t.clock += 1000L;
+        t.refresh();
+        check("2.4.4 3rd review M2: Naver 15 m, refresh at 0.9 s, real 2000 m at 0.96 s, refreshes after: far all along", farNow() && !anyNear());
+        // 낮음: put-off 진단 줄에 old가 붙지 않는다(item 10이 실제로 왔음). 그 뒤 refresh는 old(이번에 거리 없음)
+        t = afterTurn0(21700000L, 13, 15);
+        t.debug = true;
+        diagLines();
+        t.routeGuidance(rgAtIdx(1, 15, 1));
+        java.util.List<String> d = diagLines();
+        check("2.4.4 3rd review low: the put-off diag line says remain 15m (no old) and put-off",
+                d.size() == 1 && d.get(0).contains("remain 15m d ") && d.get(0).contains("(put-off)"));
+        // 낮음: 상태 0·탐색 뒤 nearWhy는 비운다
+        t = kakaoAt10(21800000L);
+        t.clock += 40L;
+        t.routeGuidance(rgAtIdx(1, 274, 3));
+        t.routeGuidance(rgAtIdx(5, 274, 3));
+        check("2.4.4 3rd review low: after rerouting the reason is cleared (not jump-hold)", "".equals(t.nearWhy));
+        t = kakaoAt10(21850000L);
+        t.clock += 40L;
+        t.routeGuidance(rgAtIdx(1, 274, 3));
+        t.routeGuidance(msg(0, U16, i(1), 1, ENUM, i(0)));
+        check("2.4.4 3rd review low: after state 0 the reason is cleared", "".equals(t.nearWhy));
+        // 낮음: 출처 바뀜·연결 끊김도 붙잡은 값을 버린다
+        t = kakaoAt10(21900000L);
+        t.clock += 40L;
+        t.routeGuidance(rgAtIdx(1, 274, 3));
+        t.disconnected();
+        t.maneuver(nearManeuver(6, 1, 0, 0, -90, null, -1, "L6"));
+        c.calls.clear();
+        t.clock += 100L;
+        t.routeGuidance(msg(0, U16, i(1), 1, ENUM, i(1), 11, STR, s("274"), 12, ENUM, i(2), 13, U16, i(6)));
+        check("2.4.4 3rd review low: disconnected forgets the held value (a new turn without item 10: no near)", !anyNear());
+        t = kakaoAt10(21950000L);
+        t.routeGuidance(msg(0, U16, i(1), 19, STR, s("App A")));
+        t.clock += 40L;
+        t.routeGuidance(rgAtIdx(1, 274, 3));
+        t.routeGuidance(msg(0, U16, i(1), 19, STR, s("App B")));
+        t.maneuver(nearManeuver(6, 1, 0, 0, -90, null, -1, "L6"));
+        c.calls.clear();
+        t.clock += 100L;
+        t.routeGuidance(msg(0, U16, i(1), 1, ENUM, i(1), 11, STR, s("274"), 12, ENUM, i(2), 13, U16, i(6)));
+        check("2.4.4 3rd review low: a new source forgets the held value (a new turn without item 10: no near)", !anyNear());
+        // 낮음: "nearLastJump = ... !newKey": 붙잡은 값을 새 회전의 첫 값으로 받은 뒤 곧바로 다음 번호가 같은 값(묵은 값)이면 미룬다
+        t = kakaoAt10(22000000L);
+        t.clock += 40L;
+        t.routeGuidance(rgAtIdx(1, 274, 3));
+        t.clock += 100L;
+        t.routeGuidance(rgAtIdx(1, 274, 6));
+        t.clock += 1000L;
+        t.routeGuidance(rgAtIdx(1, 274, 9));
+        check("2.4.4 3rd review low: the held value taken as turn 6's first, then turn 9 with the same 274 m (stale): put off",
+                farNow() && "put-off".equals(t.nearWhy));
+        // 낮음: 미루기의 !jumpPending: 붙잡는 중에 새 회전이 앞 값(붙잡기 전 값) 이하로 와도 미루지 않는다
+        t = turn3(22100000L, 300, 25);
+        t.routeGuidance(rgAtIdx(1, 300, 3));
+        check("2.4.4 3rd review low: 3@25 -> 3@300 held", "jump-hold".equals(t.nearWhy));
+        c.calls.clear();
+        t.clock += 100L;
+        t.routeGuidance(rgAtIdx(1, 20, 6));
+        check("2.4.4 3rd review low: then 6@20 (<= the old 25 m) while held: taken at once (near, D 30 m, bar 60), not put off", db(13, 60) && !farAny());
+        Car.unit = Car.DISTANCE_MILES;
+    }
+
+    /** 회전 18(우회전)·21(종류 type) 관리자 */
+    static CpTurnsFit turns1821(long clock, int type) {
+        c = new Cluster();
+        CpTurnsFit t = new CpTurnsFit(new android.content.Context(), c, null);
+        t.clock = clock;
+        t.maneuver(nearManeuver(18, 2, 0, 0, 90, null, -1, "R18"));
+        t.maneuver(nearManeuver(21, type, 0, 0, -90, null, -1, "L21"));
+        return t;
+    }
+
+    /** 시각(ms, 시작 기준)마다 갱신을 보내고, phase부터 1초마다 refresh()를 부른다(Dipo 타이머). until까지 */
+    static void timed(CpTurnsFit t, long[] at, Iap2NotiMsg[] msgs, long phase, long until, long clearAt) {
+        long start = t.clock, tick = phase;
+        int k = 0;
+        boolean cleared = false;
+        while (true) {
+            long next = k < at.length ? at[k] : Long.MAX_VALUE;
+            if (tick <= until && tick < next) {
+                t.clock = start + tick;
+                if (!cleared && tick >= clearAt) { c.calls.clear(); cleared = true; }
+                t.refresh();
+                tick += 1000L;
+            } else if (next != Long.MAX_VALUE) {
+                t.clock = start + next;
+                if (!cleared && next >= clearAt) { c.calls.clear(); cleared = true; }
+                t.routeGuidance(msgs[k]);
+                k++;
+            } else {
+                break;
+            }
+        }
+    }
+
+    /** 2.4.4 후보 4차 리뷰(중간 3·낮음 5) 반영 시험 */
+    static void review4() {
+        Car.unit = Car.DISTANCE_KM;
+        // 중간 1: 잘못 받은 큰 그림(묵은 15m를 두 번째에 받아들임) 뒤 실제 2000m가 오면, 붙잡지 않고 바로 멀리 있음
+        CpTurnsFit t = turns1821(23000000L, 13);
+        t.routeGuidance(rgAtIdx(1, 300, 18));
+        t.clock += 1000L;
+        t.routeGuidance(rgAtIdx(1, 15, 18));
+        t.clock += 30L;
+        t.routeGuidance(rgAtIdx(1, 15, 21));
+        check("2.4.4 4th review M1: 21@15 put off", farNow() && "put-off".equals(t.nearWhy));
+        t.clock += 300L;
+        t.routeGuidance(rgAtIdx(1, 15, 21));
+        check("2.4.4 4th review M1: 21@15 again: taken (near 25, bar 50)", db(25, 50));
+        c.calls.clear();
+        t.clock += 700L;
+        t.routeGuidance(rgAtIdx(1, 2000, 21));
+        check("2.4.4 4th review M1: 21@2000 (would be far): sent at once as far, not held", tbtCount() == 1 && farNow()
+                && !"jump-hold".equals(t.nearWhy));
+        // 중간 1: 뛴 값을 받아도 곧 회전이 유지되면 그대로 붙잡는다(카카오 3@274)
+        t = turn3(23100000L, 36, 10);
+        c.calls.clear();
+        t.routeGuidance(rgAtIdx(1, 274, 3));
+        check("2.4.4 4th review M1: 3@10 -> 3@274 (still near if taken): held", tbtCount() == 0 && "jump-hold".equals(t.nearWhy));
+        // 중간 2: 앞 회전 마지막 갱신이 조금(2m) 오른 값이어도 네이버 순서는 미룬다
+        t = turns1821(23200000L, 13);
+        t.routeGuidance(rgAtIdx(1, 300, 18));
+        t.clock += 1000L;
+        t.routeGuidance(rgAtIdx(1, 13, 18));
+        t.clock += 1000L;
+        t.routeGuidance(rgAtIdx(1, 15, 18));
+        c.calls.clear();
+        t.clock += 30L;
+        t.routeGuidance(rgAtIdx(1, 15, 21));
+        check("2.4.4 4th review M2: 18@13 -> 18@15 (rise 2 m) -> 21@15: put off", farNow() && "put-off".equals(t.nearWhy));
+        t.clock += 1000L;
+        t.routeGuidance(rgAtIdx(1, 2000, 21));
+        check("2.4.4 4th review M2: then 21@2000: far, no near at any point", farNow() && !anyNear());
+        // 오름 크기·시간 경계: 오름 10m를 500ms 안에 받았으면 건너뜀(바로 큰 그림), 9m면 미룸, 501ms 지나면 미룸
+        int[][] e = { { 10, 400, 1 }, { 9, 400, 0 }, { 10, 500, 1 }, { 10, 501, 0 } };
+        for (int[] x : e) {
+            t = turn3(23300000L, 300, 10);
+            t.routeGuidance(rgAtIdx(1, 10 + x[0], 3));
+            t.clock += x[1];
+            c.calls.clear();
+            t.routeGuidance(rgAtIdx(1, 10 + x[0], 6));
+            boolean skipped = !farNow();
+            check("2.4.4 4th review edge: rise " + x[0] + " m, number " + x[1] + " ms later: " + (x[2] == 1 ? "taken at once" : "put off"),
+                    skipped == (x[2] == 1));
+        }
+        // 낮음 2: 받아들이면 nearPutOff를 비운다(같은 회전이 나중에 다시 와도 한 번 미룰 수 있게 한도 시계가 남지 않음)
+        t = afterTurn0(23400000L, 1, 20);
+        t.routeGuidance(rgAtIdx(1, 12, 1));
+        t.clock += 1000L;
+        t.routeGuidance(rgAtIdx(1, 12, 1));
+        check("2.4.4 4th review low 2: taken, nearPutOff cleared", db(13, 40) && t.updates.get(1).nearPutOff == null);
+        // 타이머 위상 훑기(50ms 간격 20가지): 네이버 순서는 큰 그림 0, 카카오 순서는 멀리 있음·지난 회전 그림 0
+        int bad = 0;
+        for (long ph = 0; ph < 1000; ph += 50) {
+            t = turns1821(23500000L + ph * 10000L, 13);
+            timed(t, new long[] { 0, 1000, 1040, 1990, 2990 },
+                    new Iap2NotiMsg[] { rgAtIdx(1, 300, 18), rgAtIdx(1, 15, 18), rgAtIdx(1, 15, 21), rgAtIdx(1, 2000, 21), rgAtIdx(1, 1985, 21) },
+                    ph, 4000, 1040);
+            if (anyNear()) bad++;
+        }
+        check("2.4.4 4th review: Naver order over 20 timer phases: no near frame after the change (bad " + bad + ")", bad == 0);
+        bad = 0;
+        for (long ph = 0; ph < 1000; ph += 50) {
+            t = turn3(24000000L + ph * 10000L);
+            timed(t, new long[] { 0, 1000, 1040, 1170, 2170 },
+                    new Iap2NotiMsg[] { rgAtIdx(1, 36, 3), rgAtIdx(1, 10, 3), rgAtIdx(1, 274, 3), rgAtIdx(1, 274, 6), rgAtIdx(1, 250, 6) },
+                    ph, 3000, 1040);
+            boolean ok = !farAny();
+            for (String x : c.calls) if (x.startsWith("tbt ") && !x.split(" ")[3].equals("270.0")) ok = false;
+            if (!ok) bad++;
+        }
+        check("2.4.4 4th review: Kakao order over 20 timer phases: no far frame, no right-turn frame after the jump (bad " + bad + ")", bad == 0);
+        Car.unit = Car.DISTANCE_MILES;
+    }
+
+    /**
+     * 2.4.4 후보(나): 옆길 비트를 순정 내비가 보낸 값에 맞춘다(니로 차 로그 logs/usb-1111-before-173·logs/car-1111-173beta1의
+     * "stock navigation: tbt icon 13" 줄, FINDINGS "좌회전 큰 그림의 옆길 비트가 한 칸 어긋남"). 뒤쪽(180도 ±12)에 비트가 없어
+     * 왼쪽 절반은 비트 8~14(오른쪽 비트 1~7과 거울), 방향 칸은 나가는 길 각도 그대로(7.5도 단위)
+     */
+    static void stockSideBits() {
+        int[][] e = { { -90, 11, 36 }, { -113, 10, 33 }, { -112, 10, 33 }, { 90, 4, 12 }, { 22, 1, 3 }, { 23, 1, 3 }, { 0, 0, 0 } };
+        for (int[] x : e) {
+            check("2.4.4 stock side bits: exit " + x[0] + " deg: bit " + x[1] + ", slot " + x[2],
+                    CpTurnsFit.exitBit(x[0]) == x[1] && CpTurnsFit.exitSlot(x[0]) == x[2]);
+        }
+        // 순정 줄 다섯 가지(다른 길 각도 + 나가는 길): side 2065 dir 270, 1025 dir 247.5, 2064 dir 90, 3 dir 22.5, 17 dir 0
+        check("2.4.4 stock side 2065 dir 270: roads 0, 90, exit -90", CpTurnsFit.sideBits(new int[] { 0, 90, -90 }, CpTurnsFit.exitBit(-90)) == 2065);
+        check("2.4.4 stock side 1025 dir 247.5: road 0, exit -113", CpTurnsFit.sideBits(new int[] { 0 }, CpTurnsFit.exitBit(-113)) == 1025
+                && CpTurnsFit.exitSlot(-113) * 7.5f == 247.5f);
+        check("2.4.4 stock side 2064 dir 90: roads 90, -90, exit 90", CpTurnsFit.sideBits(new int[] { 90, -90 }, CpTurnsFit.exitBit(90)) == 2064);
+        check("2.4.4 stock side 3 dir 22.5: road 0, exit 22", CpTurnsFit.sideBits(new int[] { 0 }, CpTurnsFit.exitBit(22)) == 3
+                && CpTurnsFit.exitSlot(22) * 7.5f == 22.5f);
+        check("2.4.4 stock side 17 dir 0: roads 0, 90, exit 0", CpTurnsFit.sideBits(new int[] { 0, 90 }, CpTurnsFit.exitBit(0)) == 17);
+        // 큰 그림 한 프레임: 좌회전(나가는 길 -90, 다른 길 0·90) = 순정 side 2065 dir 270
+        Car.unit = Car.DISTANCE_KM;
+        c = new Cluster();
+        CpTurnsFit t = new CpTurnsFit(new android.content.Context(), c, null);
+        t.clock = 25000000L;
+        t.maneuver(nearManeuver(0, 1, 0, 0, -90, new int[] { 0, 90, -90 }, -1, "Left Rd"));
+        t.routeGuidance(rgAt(1, 200));
+        check("2.4.4 stock: a left turn near frame is side 2065 dir 270.0 (was 4096+)", last("tbt ").startsWith("tbt 13 2065 270.0 "));
+        // 각도 없이 종류만: 좌 36(270도) 비트 11, 급좌 30(225도) 비트 9, 약간 좌 42(315도) 비트 13, 우 12 비트 4
+        check("2.4.4 stock: type-only directions: left bit 11, sharp left bit 9, slight left bit 13, right bit 4",
+                java.util.Arrays.toString(CpTurnsFit.nearDisplay(1, 0, 0, 0, 70)).equals("[13, 11, 36]")
+                        && java.util.Arrays.toString(CpTurnsFit.nearDisplay(47, 0, 0, 0, 72)).equals("[13, 9, 30]")
+                        && java.util.Arrays.toString(CpTurnsFit.nearDisplay(49, 0, 0, 0, 71)).equals("[13, 13, 42]")
+                        && java.util.Arrays.toString(CpTurnsFit.nearDisplay(2, 0, 0, 0, 67)).equals("[13, 4, 12]"));
+        // 뒤쪽 출구는 순정 규칙 그대로(179도 이하 비트 7·칸 21, 그 밖 비트 8·칸 27), 왼쪽 경계 192도는 비트 8, 348도 직전은 비트 14
+        check("2.4.4 stock: behind exits 7/21 and 8/27 kept; left edges 192 deg bit 8, 347 deg bit 14, no bit 15",
+                CpTurnsFit.exitBit(175) == 7 && CpTurnsFit.exitSlot(175) == 21 && CpTurnsFit.exitBit(-175) == 8 && CpTurnsFit.exitSlot(-175) == 27
+                        && CpTurnsFit.streetBit(-168) == 8 && CpTurnsFit.streetBit(-13) == 14 && CpTurnsFit.streetBit(-12) == 0);
+        Car.unit = Car.DISTANCE_MILES;
+    }
+
+    /** 2.4.4 후보 5차 리뷰(중간 1·낮음 7) 반영 시험 */
+    static void review5() {
+        Car.unit = Car.DISTANCE_KM;
+        // 중간 1: 진짜로 가까운 연속 회전(새 회전 첫 값 < 앞 회전 마지막 값)은 미루지 않는다(HEAD·베타 2와 같은 출력: 바로 큰 그림)
+        int[][] seq = { { 40, 35, 90 }, { 12, 10, 30 }, { 120, 100, 90 }, { 25, 20, 60 } };
+        for (int[] x : seq) {
+            CpTurnsFit t = turns1821(26000000L + x[0] * 1000L, 1);
+            t.routeGuidance(rgAtIdx(1, 300, 18));
+            t.clock += 1000L;
+            t.routeGuidance(rgAtIdx(1, x[0], 18));
+            c.calls.clear();
+            t.clock += 40L;
+            t.routeGuidance(rgAtIdx(1, x[1], 21));
+            check("2.4.4 5th review M1: 18@" + x[0] + " -> 21@" + x[1] + ": near at once (bar " + x[2] + "), not put off", db(13, x[2]) && !farAny());
+        }
+        // 네이버 묵은 값(앞 값과 같음)은 그대로 미룬다
+        CpTurnsFit t = turns1821(26200000L, 13);
+        t.routeGuidance(rgAtIdx(1, 300, 18));
+        t.clock += 1000L;
+        t.routeGuidance(rgAtIdx(1, 15, 18));
+        t.clock += 40L;
+        t.routeGuidance(rgAtIdx(1, 15, 21));
+        check("2.4.4 5th review M1: Naver 18@15 -> 21@15 (equal): still put off", farNow() && "put-off".equals(t.nearWhy));
+        // 낮음 3: 다른 회전을 받아들이면 nearPutOff를 비운다: 18@15 → 21@15(미룸) → 18@14 → 3.5초 뒤 item 10 없는 21은 묵은 14m를 받지 않음
+        t.clock += 300L;
+        t.routeGuidance(rgAtIdx(1, 14, 18));
+        check("2.4.4 5th review low 3: back to 18@14: accepted, nearPutOff cleared", t.updates.get(1).nearPutOff == null);
+        c.calls.clear();
+        t.clock += 3500L;
+        t.routeGuidance(msg(0, U16, i(1), 1, ENUM, i(1), 11, STR, s("14"), 12, ENUM, i(2), 13, U16, i(21)));
+        check("2.4.4 5th review low 3: 3.5 s later turn 21 without item 10: stale-dist (the old 14 m not taken)",
+                !anyNear() && "stale-dist".equals(t.nearWhy));
+        // 낮음 2: 작은 오름 뒤 같은 값의 중복 갱신은 nearLastJump를 끄지 않는다(3@10 → 3@28 → 40ms 3@28 → 6@28)
+        t = turn3(26300000L, 36, 10);
+        t.routeGuidance(rgAtIdx(1, 28, 3));
+        t.clock += 40L;
+        t.routeGuidance(rgAtIdx(1, 28, 3));
+        c.calls.clear();
+        t.clock += 60L;
+        t.routeGuidance(rgAtIdx(1, 28, 6));
+        check("2.4.4 5th review low 2: 3@10 -> 3@28 -> 3@28 (dup) -> 6@28: near at once, not put off", db(13, 90) && !farAny());
+        // 중복이어도 500ms 한도는 그대로: 오른 뒤 600ms에 새 번호(같은 값)는 미룬다
+        t = turn3(26350000L, 36, 10);
+        t.routeGuidance(rgAtIdx(1, 28, 3));
+        t.clock += 300L;
+        t.routeGuidance(rgAtIdx(1, 28, 3));
+        t.clock += 300L;
+        t.routeGuidance(rgAtIdx(1, 28, 6));
+        check("2.4.4 5th review low 2: the dup keeps the rise time: 600 ms after the rise the new turn is put off", farNow()
+                && "put-off".equals(t.nearWhy));
+        // 낮음 7: nearLastJump의 !newKey(100ms 순서): 붙잡은 값을 6의 첫 값으로 받은 100ms 뒤 9@274(같은 값)는 미룬다
+        t = kakaoAt10(26400000L);
+        t.clock += 40L;
+        t.routeGuidance(rgAtIdx(1, 274, 3));
+        t.clock += 100L;
+        t.routeGuidance(rgAtIdx(1, 274, 6));
+        t.clock += 100L;
+        t.routeGuidance(rgAtIdx(1, 274, 9));
+        check("2.4.4 5th review low 7: held value taken as turn 6's first, 100 ms later 9@274: put off", farNow() && "put-off".equals(t.nearWhy));
+        // 낮음 7: nearForget·reset()·Update.clear()가 미루기·오름 상태를 비운다(상태를 직접 본다)
+        t = turn3(26500000L, 36, 10);
+        t.routeGuidance(rgAtIdx(1, 28, 3));
+        CpTurnsFit.Update u = t.updates.get(1);
+        u.nearPutOff = "x";
+        boolean before = u.nearLastJump && u.nearPrevLast >= 0;
+        t.nearForget();
+        check("2.4.4 5th review low 7: nearForget clears nearPutOff, nearLastJump, nearPrevLast, nearJump, nearKey",
+                before && u.nearPutOff == null && !u.nearLastJump && u.nearPrevLast == -1 && u.nearJump == -1 && u.nearKey == null);
+        t = turn3(26550000L, 36, 10);
+        t.routeGuidance(rgAtIdx(1, 274, 3));
+        u = t.updates.get(1);
+        u.nearPutOff = "x";
+        u.nearLastJump = true;
+        boolean held = u.nearJump == 274;
+        t.reset();
+        check("2.4.4 5th review low 7: reset() (Update.clear()) clears the held value and the put-off/rise state",
+                held && u.nearJump == -1 && u.nearPutOff == null && !u.nearLastJump && u.nearPrevLast == -1 && u.nearKey == null);
+        Car.unit = Car.DISTANCE_MILES;
+    }
+
+    /** 회전 하나를 구성요소 ids에 */
+    static Iap2NotiMsg nearManeuverIds(int[] ids, int index, int type, int exit, String after) {
+        return msg(0, U16, ids, 1, U16, i(index), 3, ENUM, i(type), 4, STR, s(after), 5, U32, i(500),
+                8, ENUM, i(0), 9, ENUM, i(0), 11, U8, i(exit));
+    }
+
+    /** 구성요소 ids에 다음 회전까지 m(item 10)·표시 거리(item 11)·회전 목록(item 13) */
+    static Iap2NotiMsg rgIds(int[] ids, int meters, int... list) {
+        return msg(0, U16, ids, 1, ENUM, i(1), 10, U32, i(meters), 11, STR, s(String.valueOf(meters)), 12, ENUM, i(2), 13, U16, list);
+    }
+
+    /** 앞 회전 0(우회전) 300m → 15m를 보낸 관리자(회전 1은 종류 type) */
+    static CpTurnsFit afterTurn0(long clock, int type, int last) {
+        c = new Cluster();
+        CpTurnsFit t = new CpTurnsFit(new android.content.Context(), c, null);
+        t.clock = clock;
+        t.maneuver(nearManeuver(0, 2, 0, 0, 90, null, -1, "Right Rd"));
+        t.maneuver(nearManeuver(1, type, 0, 0, 0, null, -1, "Next Rd"));
+        t.routeGuidance(rgAtIdx(1, 300, 0));
+        t.clock += 1000L;
+        t.routeGuidance(rgAtIdx(1, last, 0));
+        return t;
+    }
+
+    /** 2.4.4 후보 리뷰(높음 1·중간 4·낮음 4) 반영 시험: 시계를 올리고 refresh()를 부르는 순서 */
+    static void staleNextReview() {
+        Car.unit = Car.DISTANCE_KM;
+        // H1: 미룬 뒤 1초 타이머 refresh()가 같은 Update로 다시 판단해도 앞 회전 값을 받아들이지 않는다
+        CpTurnsFit t = afterTurn0(18000000L, 13, 15);
+        c.calls.clear();
+        t.clock += 1000L;
+        t.routeGuidance(rgAtIdx(1, 15, 1));
+        check("2.4.4 review H1: put off (far, reason put-off)", farNow() && !anyNear() && "put-off".equals(t.nearWhy));
+        t.clock += 1000L;
+        t.refresh();
+        check("2.4.4 review H1: refresh 1 s later (no new update): still far, the old 15 m not taken", farNow() && !anyNear()
+                && "stale-dist".equals(t.nearWhy));
+        // 3차 리뷰 중간 2 뒤: 미룬 뒤 2초(PUT_OFF_MAX_MS) 전의 refresh는 풀지 않는다(실제 값은 약 1초 뒤에 옴)
+        t.clock += 900L;
+        t.refresh();
+        check("2.4.4 review H1: another refresh at 1.9 s: still far", farNow() && !anyNear());
+        t.clock += 50L;
+        t.routeGuidance(rgAtIdx(1, 2000, 1));
+        check("2.4.4 review H1: the real 2000 m: far, no big picture at any point", farNow() && !anyNear());
+        // H1 유턴(17m → refresh → 380m): hold로 막대 90이 남지 않는다
+        t = afterTurn0(18100000L, 4, 17);
+        c.calls.clear();
+        t.clock += 1000L;
+        t.routeGuidance(rgAtIdx(1, 17, 1));
+        t.clock += 1000L;
+        t.refresh();
+        t.clock += 1000L;
+        t.routeGuidance(rgAtIdx(1, 380, 1));
+        check("2.4.4 review H1: U-turn 17 m, refresh, 380 m: far all along", farNow() && !anyNear());
+        // H1': 같은 값이 새 갱신으로 다시 오면(진짜로 바로 붙은 회전) refresh 뒤라도 받아들인다
+        t = afterTurn0(18200000L, 1, 15);
+        t.clock += 1000L;
+        t.routeGuidance(rgAtIdx(1, 15, 1));
+        t.clock += 1000L;
+        t.refresh();
+        t.clock += 1000L;
+        t.routeGuidance(rgAtIdx(1, 15, 1));
+        check("2.4.4 review H1': the same 15 m in a new update after a refresh: taken, near bar 50", db(13, 50));
+        // M4: 미루는 갱신에서 HUD 둘째·셋째 지점(item 10 + 다음 구간)을 앞 회전 거리로 계산하지 않는다
+        c = new Cluster();
+        t = new CpTurnsFit(new android.content.Context(), c, null);
+        t.clock = 18300000L;
+        t.maneuver(nearManeuver(0, 2, 0, 0, 90, null, -1, "Right Rd"));
+        t.maneuver(nearManeuver(1, 13, 0, 0, 0, null, -1, "Fork Rd"));
+        t.maneuver(nearManeuver(2, 1, 0, 0, -90, null, -1, "Left Rd"));
+        t.routeGuidance(msg(0, U16, i(1), 1, ENUM, i(1), 10, U32, i(300), 11, STR, s("300"), 12, ENUM, i(2), 13, U16, i(0, 1, 2)));
+        t.routeGuidance(msg(0, U16, i(1), 1, ENUM, i(1), 10, U32, i(15), 11, STR, s("15"), 12, ENUM, i(2), 13, U16, i(0, 1, 2)));
+        check("2.4.4 review M4: before: the HUD 2nd point is 15 m + 500 m", last("2c ").startsWith("2c 0 0 15 0 0 515 "));
+        c.calls.clear();
+        t.routeGuidance(msg(0, U16, i(1), 1, ENUM, i(1), 10, U32, i(15), 11, STR, s("15"), 12, ENUM, i(2), 13, U16, i(1, 2)));
+        check("2.4.4 review M4: put off: the HUD 2nd and 3rd points empty (not the old 15 m + 500 m)",
+                farNow() && last("2c ").endsWith(" 0 0 65535 0 0 65535"));
+        check("2.4.4 review M4: put off: the cluster's distance number is item 11 as sent (15, a known limit, owner to decide)",
+                last("tbt ").split(" ")[4].equals("15.0") && last("tbt ").split(" ")[5].equals("0"));
+        t.routeGuidance(msg(0, U16, i(1), 1, ENUM, i(1), 10, U32, i(2000), 11, STR, s("2000"), 12, ENUM, i(2), 13, U16, i(1, 2)));
+        check("2.4.4 review M4: the real 2000 m: HUD 2nd point 2000 m + 500 m (2.5 km)", last("2c ").split(" ")[5].equals("5") && last("2c ").split(" ")[6].equals("2"));
+        // M1: 재탐색·안내 끝 뒤 새 경로에서 같은 번호·종류의 회전도 다시 미룬다
+        t = afterTurn0(18400000L, 13, 15);
+        t.clock += 1000L;
+        t.routeGuidance(rgAtIdx(1, 15, 1));
+        t.clock += 1000L;
+        t.routeGuidance(rgAtIdx(1, 2000, 1));
+        t.clock += 1000L;
+        t.routeGuidance(rgAtIdx(5, 2000, 1));
+        t.clock += 1000L;
+        t.routeGuidance(rgAtIdx(1, 300, 0));
+        t.clock += 1000L;
+        t.routeGuidance(rgAtIdx(1, 15, 0));
+        c.calls.clear();
+        t.clock += 1000L;
+        t.routeGuidance(rgAtIdx(1, 15, 1));
+        check("2.4.4 review M1: after rerouting, the same index and type again with the old 15 m: put off again", farNow() && !anyNear());
+        t = afterTurn0(18500000L, 13, 15);
+        t.clock += 1000L;
+        t.routeGuidance(rgAtIdx(1, 15, 1));
+        t.clock += 1000L;
+        t.routeGuidance(rgAtIdx(1, 2000, 1));
+        t.routeGuidance(msg(0, U16, i(1), 1, ENUM, i(0)));
+        t.clock += 1000L;
+        t.routeGuidance(rgAtIdx(1, 300, 0));
+        t.clock += 1000L;
+        t.routeGuidance(rgAtIdx(1, 15, 0));
+        c.calls.clear();
+        t.clock += 1000L;
+        t.routeGuidance(rgAtIdx(1, 15, 1));
+        check("2.4.4 review M1: after the guidance ended (state 0), the same turn again: put off again", farNow() && !anyNear());
+        // 2차 리뷰: 이름 돌아옴(방금 본 앱 이름으로 돌아와 회전을 다시 받음)의 nearForget(): 곧 회전 상태(열쇠·처음 거리·앞 회전 거리)를 잊는다
+        c = new Cluster();
+        t = new CpTurnsFit(new android.content.Context(), c, null);
+        t.clock = 18550000L;
+        t.maneuver(nearManeuver(0, 2, 0, 0, 90, null, -1, "Right Rd"));
+        t.routeGuidance(msg(0, U16, i(1), 1, ENUM, i(1), 10, U32, i(300), 11, STR, s("300"), 12, ENUM, i(2), 13, U16, i(0), 19, STR, s("App A")));
+        t.clock += 1000L;
+        t.routeGuidance(msg(0, U16, i(1), 19, STR, s("App B")));
+        t.maneuver(nearManeuver(0, 2, 0, 0, 90, null, -1, "Right Rd"));
+        t.routeGuidance(rgAt(1, 300));
+        t.clock += 1000L;
+        t.routeGuidance(rgAt(1, 150));
+        check("2nd review: before the name comes back: near, bar 50 (D 300 m)", db(13, 50));
+        t.clock += 1000L;
+        t.routeGuidance(msg(0, U16, i(1), 19, STR, s("App A")));
+        t.maneuver(nearManeuver(0, 2, 0, 0, 90, null, -1, "Right Rd"));
+        t.clock += 1000L;
+        t.routeGuidance(rgAt(1, 140));
+        check("2nd review: name back, the same turn resent at 140 m: D caught again (140 m, bar 90), not put off against the old 150 m",
+                db(13, 90) && "in-d".equals(t.nearWhy));
+        // L3: 한 갱신에 구성요소가 둘(1, 2)이면 near 상태는 구성요소마다 따로: 곧 회전 중에 멀리 있음이 섞이지 않고 막대가 줄어든다
+        c = new Cluster();
+        t = new CpTurnsFit(new android.content.Context(), c, null);
+        t.clock = 18600000L;
+        int[] two = i(1, 2);
+        t.maneuver(nearManeuverIds(two, 0, 2, 90, "Right Rd"));
+        t.routeGuidance(rgIds(two, 500, 0));
+        check("2.4.4 review L3: two components at 500 m: far", farNow());
+        c.calls.clear();
+        for (int m : new int[] { 340, 300, 250, 200 }) {
+            t.clock += 1000L;
+            t.routeGuidance(rgIds(two, m, 0));
+        }
+        check("2.4.4 review L3: 340-200 m on both components: no far frame mixed in", !farAny());
+        check("2.4.4 review L3: 200 m: bar 50 (D 350 m kept, not caught again per component)", db(13, 50));
+        // M2 (a) 알려진 한계: 새 회전의 첫 값이 앞 회전 마지막보다 1~2m 크면 앞 값으로 보지 않는다(여유 없음, mod.md 근거)
+        t = afterTurn0(18700000L, 13, 15);
+        t.clock += 1000L;
+        t.routeGuidance(rgAtIdx(1, 17, 1));
+        check("2.4.4 review M2 (a) known limit: old last 15 m, new first 17 m: taken (near, D 30 m)", db(25, 50));
+        // M2 (b) 알려진 한계: 앞 값이 두 번 이어 오면(15m 미룸 → 10m) 두 번째는 받아들인다(미루기는 회전마다 한 번)
+        t = afterTurn0(18800000L, 13, 15);
+        t.clock += 1000L;
+        t.routeGuidance(rgAtIdx(1, 15, 1));
+        t.clock += 1000L;
+        t.routeGuidance(rgAtIdx(1, 10, 1));
+        check("2.4.4 review M2 (b) known limit: 15 m put off, then 10 m: taken (near, D 30 m, bar 30)", db(25, 30));
+        // M3 알려진 한계: 진짜로 붙은 회전(25m → 20m)은 멀리 있음 한 프레임, 그 뒤 item 10 없는 갱신만 오면 다음 item 10까지 멀리 있음
+        t = afterTurn0(18900000L, 1, 25);
+        c.calls.clear();
+        t.clock += 1000L;
+        t.routeGuidance(rgAtIdx(1, 20, 1));
+        // 5차 리뷰 중간 1: 미루기는 앞 값과 같을 때만이라, 앞 25m보다 짧은 진짜 20m는 바로 큰 그림(전의 "한 프레임 멀리 있음" 한계가 없어짐)
+        check("2.4.4 review M3 (5th review M1): a real close turn at 20 m (< old 25 m): near at once (D 30 m, bar 60)", db(13, 60) && !farAny());
+        // L2 알려진 한계: 재탐색 상태 없이 경로가 바뀌어 새 회전이 앞 회전 거리보다 가까우면(800m → 300m) 한 프레임 늦다
+        c = new Cluster();
+        t = new CpTurnsFit(new android.content.Context(), c, null);
+        t.clock = 19000000L;
+        t.maneuver(nearManeuver(0, 2, 0, 0, 90, null, -1, "Right Rd"));
+        t.maneuver(nearManeuver(7, 1, 0, 0, -90, null, -1, "Left Rd"));
+        t.routeGuidance(rgAtIdx(1, 800, 0));
+        t.clock += 1000L;
+        t.routeGuidance(rgAtIdx(1, 300, 7));
+        // 5차 리뷰 중간 1: 같은 값이 아니라 미루지 않는다(전의 한 프레임 늦음 한계가 없어짐)
+        check("2.4.4 review L2 (5th review M1): a new route without rerouting, its turn at 300 m (< old 800 m): near at once", db(13, 90));
+        t.clock += 1000L;
+        t.routeGuidance(rgAtIdx(1, 290, 7));
+        check("2.4.4 review L2: the next update 290 m: near (D 290 m, bar 90)", db(13, 90));
         Car.unit = Car.DISTANCE_MILES;
     }
 
@@ -554,15 +1435,19 @@ public final class CpTurnsTest {
         // 처음 거리 1400m > D, 60m -> 막대 10 x max(1, floor(600/350)) = 10
         check("1.7.2 diag: near turn: link, lanes, remain, D, reason and the near tbt arguments",
                 d.size() == 2 && d.get(1).equals("CarPlay diag: maneuver 0 type 2 link 3 lanes 2 rg lanes 0/0/0 remain 60m d 350 -> near (in-d); "
-                        + "tbt display 13 side 4113 dir 90.0 bar 10 barErr 0 unit 0 dist 60.0")
-                        && "tbt 13 4113 90.0 60.0 0 0 0 10 0".equals(last("tbt ")));
+                        + "tbt display 13 side 2065 dir 90.0 bar 10 barErr 0 unit 0 dist 60.0")
+                        && "tbt 13 2065 90.0 60.0 0 0 0 10 0".equals(last("tbt ")));
         // 곧 회전에서 막대가 같으면(55m, 막대 10) 줄이 없고, 막대가 바뀌면(200m, 막대 50) 한 줄
         t.routeGuidance(rgAt(1, 55));
         check("1.7.2 diag: near, same bar: no new line", diagLines().isEmpty());
         t.routeGuidance(rgAt(1, 200));
         d = diagLines();
+        // 2.4.4 후보: 55m → 200m(회전을 지난 꼴)는 한 번 붙잡고 진단 줄 하나(held)만 남는다
+        check("2.4.4 diag: 55 -> 200 m held once: one held line", d.size() == 1 && d.get(0).endsWith("remain 200m -> held (jump-hold)"));
+        t.routeGuidance(rgAt(1, 200));
+        d = diagLines();
         check("1.7.2 diag: near, the bar changes: one line with the new bar",
-                d.size() == 1 && d.get(0).endsWith("tbt display 13 side 4113 dir 90.0 bar 50 barErr 0 unit 0 dist 200.0"));
+                d.size() == 1 && d.get(0).endsWith("tbt display 13 side 2065 dir 90.0 bar 50 barErr 0 unit 0 dist 200.0"));
         // 같은 차로 안내를 다시 받으면 줄을 남기지 않는다
         t.lanes(laneMsg(3, 2));
         check("1.7.2 diag: the same lane guidance again: no new line", diagLines().isEmpty());
@@ -572,25 +1457,28 @@ public final class CpTurnsTest {
     /** 1.7.2(M-4·M-5·M-2, 소유자 결정 2026-11-09): 곧 회전 화면, 탐색 중 9·10, HUD 3칸 */
     static void near172() {
         // 옆길 비트와 방향 칸(순정 SetSideStreetBit)
-        check("1.7.2 M-4 side bits: straight 0, right 90 bit 4, left 270 bit 12, behind (180 +-12) none",
-                CpTurnsFit.streetBit(0) == 0 && CpTurnsFit.streetBit(90) == 4 && CpTurnsFit.streetBit(-90) == 12
+        // 2.4.4 후보(나): 왼쪽 절반은 순정 차 로그대로 한 칸 당김(270도 = 비트 11, 왼쪽 끝 347도 = 비트 14, 비트 15 없음)
+        check("1.7.2 M-4 side bits: straight 0, right 90 bit 4, left 270 bit 11 (2.4.4, was 12), behind (180 +-12) none",
+                CpTurnsFit.streetBit(0) == 0 && CpTurnsFit.streetBit(90) == 4 && CpTurnsFit.streetBit(-90) == 11
                         && CpTurnsFit.streetBit(180) == -1 && CpTurnsFit.streetBit(170) == -1 && CpTurnsFit.streetBit(-170) == -1
                         && CpTurnsFit.streetBit(12) == 0 && CpTurnsFit.streetBit(13) == 1 && CpTurnsFit.streetBit(45) == 2
-                        && CpTurnsFit.streetBit(347) == 15 && CpTurnsFit.streetBit(-13) == 15);
-        check("1.7.2 M-4 side bits: T junction (straight, right, left; incoming road 180 left out) with the right exit = 0x1011 (car-3 picture)",
-                CpTurnsFit.sideBits(new int[] { 0, 90, -90, 180 }, CpTurnsFit.exitBit(90)) == 0x1011);
+                        && CpTurnsFit.streetBit(347) == 14 && CpTurnsFit.streetBit(-13) == 14);
+        check("1.7.2 M-4 side bits: T junction (straight, right, left; incoming road 180 left out) with the right exit = 0x0811 (2.4.4: stock side 2065; car-3 picture showed our old 0x1011)",
+                CpTurnsFit.sideBits(new int[] { 0, 90, -90, 180 }, CpTurnsFit.exitBit(90)) == 0x0811);
         check("1.7.2 M-4 side bits: no other angles: the exit's bit only (V-9); behind exits bit 7 (<=179) / 8",
-                CpTurnsFit.sideBits(null, CpTurnsFit.exitBit(-45)) == 1 << 14 && CpTurnsFit.exitSlot(-45) == 42
+                CpTurnsFit.sideBits(null, CpTurnsFit.exitBit(-45)) == 1 << 13 && CpTurnsFit.exitSlot(-45) == 42
                         && CpTurnsFit.exitSlot(170) == 21 && CpTurnsFit.sideBits(null, CpTurnsFit.exitBit(170)) == 1 << 7
                         && CpTurnsFit.exitSlot(-170) == 27 && CpTurnsFit.sideBits(null, CpTurnsFit.exitBit(-170)) == 1 << 8);
-        check("review 4: an exit at -160 degrees (200 clockwise) is bit 9 (slot 27), not the behind bit 8",
-                CpTurnsFit.exitBit(-160) == 9 && CpTurnsFit.exitSlot(-160) == 27 && CpTurnsFit.sideBits(null, CpTurnsFit.exitBit(-160)) == 1 << 9);
+        // 2.4.4 후보(나): 200도는 뒤쪽(192도 미만)이 아닌 왼쪽 첫 칸 = 비트 8(칸 27). 전에는 비트 9로 셌다
+        check("review 4: an exit at -160 degrees (200 clockwise) is a street bit (2.4.4: bit 8, slot 27), not the behind rule",
+                CpTurnsFit.streetBit(-160) == 8 && CpTurnsFit.exitBit(-160) == 8 && CpTurnsFit.exitSlot(-160) == 27
+                        && CpTurnsFit.sideBits(null, CpTurnsFit.exitBit(-160)) == 1 << 8);
         // 표시 번호(순정 SetCase*)
         int[] r = CpTurnsFit.nearDisplay(2, 0, 0, 0, 67), l = CpTurnsFit.nearDisplay(1, 0, 0, -90, 70), u = CpTurnsFit.nearDisplay(4, 0, 0, 0, 72),
                 ul = CpTurnsFit.nearDisplay(4, 1, 0, 0, 73), xr = CpTurnsFit.nearDisplay(23, 0, 0, 0, 164), xl = CpTurnsFit.nearDisplay(22, 0, 0, 0, 165),
                 fk = CpTurnsFit.nearDisplay(13, 0, 0, 0, 71), rb = CpTurnsFit.nearDisplay(29, 0, 1, 90, 99), sr = CpTurnsFit.nearDisplay(48, 0, 0, 0, 68);
         check("1.7.2 M-4 display: turn 13 (right 12, left 36), U-turn 31 (36; left-hand traffic 12), exit right 17 / left 18, keep left 25, roundabout its exit icon",
-                arr(r).equals("[13, 4, 12]") && arr(l).equals("[13, 12, 36]") && arr(u).equals("[31, -1, 36]") && arr(ul).equals("[31, -1, 12]")
+                arr(r).equals("[13, 4, 12]") && arr(l).equals("[13, 11, 36]") && arr(u).equals("[31, -1, 36]") && arr(ul).equals("[31, -1, 12]")
                         && arr(xr).equals("[17, -1, 12]") && arr(xl).equals("[18, -1, 36]") && arr(fk).equals("[25, -1, 42]")
                         && arr(rb).equals("[99, 4, 12]") && arr(sr).equals("[13, 6, 18]"));
         check("1.7.2 M-4 display: destination, waypoint, departure, ferry, no turn: no near layout (far, bar invalid)",
@@ -608,25 +1496,25 @@ public final class CpTurnsTest {
         CpTurnsFit t = new CpTurnsFit(new android.content.Context(), c, null);
         t.clock = 8000000L;
         // 소유자 결정 2026-11-09 "D 안의 모든 회전": 차로 안내가 없어도 D 안이면 곧 회전(카카오내비는 차로 안내를 보내지 않음)
-        // 2.4.3: D는 이 회전의 처음 거리(200m, 소유자 결정 2026-11-15) -> 막대 가득(90), 옆길 0x1011(직진·오른쪽·왼쪽), 90도, 도로 이름
+        // 2.4.3: D는 이 회전의 처음 거리(200m, 소유자 결정 2026-11-15) -> 막대 가득(90), 옆길 0x0811(직진·오른쪽·왼쪽, 2.4.4 순정 비트), 90도, 도로 이름
         t.maneuver(nearManeuver(0, 2, 0, 0, 90, new int[] { 0, 90, -90, 180 }, -1, "Road A"));
         t.routeGuidance(rgAt(1, 200));
-        expect("1.7.2 M-4 (owner 11-09): a turn without lane guidance inside D: near, turn 13, side 0x1011, 90 degrees, the road name (2.4.3: D = first 200 m, bar 90)",
-                "road [Road A]", "tbt 13 4113 90.0 200.0 0 0 0 90 0", "hud f201430000" + utf16("Road A"), "2c 0 0 200 0 0 65535 0 0 65535");
+        expect("1.7.2 M-4 (owner 11-09): a turn without lane guidance inside D: near, turn 13, side 0x0811, 90 degrees, the road name (2.4.3: D = first 200 m, bar 90)",
+                "road [Road A]", "tbt 13 2065 90.0 200.0 0 0 0 90 0", "hud f201430000" + utf16("Road A"), "2c 0 0 200 0 0 65535 0 0 65535");
         // 링크한 차로 안내에 차로가 없어도 곧 회전, 190m -> 막대 50
         t.lanes(laneMsg(3, 0));
         t.maneuver(nearManeuver(0, 2, 0, 0, 90, new int[] { 0, 90, -90, 180 }, 3, "Road A"));
         t.routeGuidance(rgAt(1, 190));
-        check("1.7.2 M-4 (owner 11-09): lane guidance with no lanes: near all the same (D 200 m: bar 90)", "tbt 13 4113 90.0 190.0 0 0 0 90 0".equals(last("tbt ")));
+        check("1.7.2 M-4 (owner 11-09): lane guidance with no lanes: near all the same (D 200 m: bar 90)", "tbt 13 2065 90.0 190.0 0 0 0 90 0".equals(last("tbt ")));
         c.calls.clear();
         // 차로 2개: 차로 프레임은 따로 나가고 곧 회전은 그대로. 180m -> 막대 10 x floor(1800/350) = 50
         t.lanes(laneMsg(3, 2));
         t.routeGuidance(rgAt(1, 180));
-        expect("1.7.2 M-4: with lane guidance and inside D: the lane frame, then turn 13, side 0x1011, 90 degrees (D 200 m: 180 m -> bar 90)",
-                "lanes f102000101" + "0000000000000000000000000000" + "01000001", "tbt 13 4113 90.0 180.0 0 0 0 90 0",
+        expect("1.7.2 M-4: with lane guidance and inside D: the lane frame, then turn 13, side 0x0811, 90 degrees (D 200 m: 180 m -> bar 90)",
+                "lanes f102000101" + "0000000000000000000000000000" + "01000001", "tbt 13 2065 90.0 180.0 0 0 0 90 0",
                 "2c 0 0 180 0 0 65535 0 0 65535");
         t.routeGuidance(rgAt(1, 30));
-        check("1.7.2 M-4: 30 m: the bar never below 10", "tbt 13 4113 90.0 30.0 0 0 0 10 0".equals(last("tbt ")));
+        check("1.7.2 M-4: 30 m: the bar never below 10", "tbt 13 2065 90.0 30.0 0 0 0 10 0".equals(last("tbt ")));
         c.calls.clear();
         // 종류를 다시 말한 갱신에 각도·차로 링크가 없음: 곧 회전 그대로, 옆길은 나가는 길 비트만
         t.maneuver(nearManeuver(0, 2, 0, 0, 90, null, -1, "Road A"));
@@ -646,6 +1534,9 @@ public final class CpTurnsTest {
         check("1.7.2 M-4/M-5: highway exit right at 900 m (D 1050 m): display 17, direction 90, no side bits, bar 80",
                 "tbt 17 0 90.0 900.0 0 0 0 80 0".equals(last("tbt ")));
         // 1.7.3(N-3): 나올 때는 D + 50m를 넘어야 멀리 있음. 1100m(= D + 50)는 아직 곧 회전, 1101m부터 멀리 있음
+        h.routeGuidance(rgAt(1, 1100));
+        // 2.4.4 후보: 900m → 1100m(뜀)는 한 번 붙잡고 다음 갱신에서 판단한다
+        check("2.4.4: 900 -> 1100 m held once (the 900 m frame stays)", "tbt 17 0 90.0 900.0 0 0 0 80 0".equals(last("tbt ")));
         h.routeGuidance(rgAt(1, 1100));
         check("1.7.3 N-3: 1100 m (D + 50 m) after near: still near (bar 90)", "tbt 17 0 90.0 1100.0 0 0 0 90 0".equals(last("tbt ")));
         h.routeGuidance(rgAt(1, 1101));
@@ -679,8 +1570,8 @@ public final class CpTurnsTest {
                 "tbt 70 0 0.0 30.0 0 0 0 0 -1".equals(last("tbt ")) && "road []".equals(last("road ")));
         v.routeGuidance(msg(0, U16, i(1), 1, ENUM, i(1), 10, U32, i(600), 11, STR, s("600"), 13, U16, i(1)));
         v.routeGuidance(msg(0, U16, i(1), 1, ENUM, i(1), 10, U32, i(300), 11, STR, s("300"), 13, U16, i(1)));
-        check("review 1: then its own distances: near at 300 m (first 600 m, D 350 m, bar 80, left 270)",
-                "tbt 13 4096 270.0 300.0 0 0 0 80 0".equals(last("tbt ")));
+        check("review 1: then its own distances: near at 300 m (first 600 m, D 350 m, bar 80, left 270, 2.4.4 bit 11)",
+                "tbt 13 2048 270.0 300.0 0 0 0 80 0".equals(last("tbt ")));
         c.calls.clear();
         // 리뷰 3: 안내가 끝나면 옛 경로의 차로 수를 버린다(진단 줄용). 소유자 결정 11-09부터 차로와 상관없이 D 안이면 곧 회전
         v.routeGuidance(rgAt(0, 0));
@@ -970,6 +1861,14 @@ public final class CpTurnsTest {
         beta2();
         hyst173();
         dynamicD();
+        staleNext();
+        staleNextReview();
+        kakaoOrder();
+        kakaoOrderMore();
+        redesignReview();
+        review4();
+        stockSideBits();
+        review5();
         layerChoice();
         System.exit(fail);
     }
@@ -999,6 +1898,9 @@ public final class CpTurnsTest {
         for (int m : new int[] { 420, 380, 352, 349, 356, 345, 362, 351, 340, 399, 348, 300, 200 }) t.routeGuidance(rgAt(1, m));
         check("1.7.3 N-3: 420..349..399..200 m around D 350 m: far, then near once, never back to far", "01".equals(layouts()));
         c.calls.clear();
+        t.routeGuidance(rgAt(1, 400));
+        // 2.4.4 후보: 200m → 400m(뜀)는 한 번 붙잡고 다음 갱신에서 판단한다
+        check("2.4.4: 200 -> 400 m held once (nothing sent)", tbtCount() == 0);
         t.routeGuidance(rgAt(1, 400));
         check("1.7.3 N-3: 400 m (D + 50) still near", "1".equals(layouts()));
         c.calls.clear();

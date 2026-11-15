@@ -51,6 +51,12 @@ package hmgapi.mods.wireless.dipo;
 //     (legacyIcon: 2.4.1만 받던 줄, bandedTurn, fallbackIcon, roundaboutIcon)
 //   - 카플레이 길안내 출처 이름 로그(디버그 켠 차만, T-5 ①)
 //   - D를 고정하지 않는다(소유자 결정 2026-11-15): 이 회전의 처음 남은 거리가 350m·1050m보다 짧으면 그 거리를 D로
+// Korea Projection 1.7.4 베타 3(2026-11-15, 모드 2.4.4):
+//   - 회전이 바뀔 때 큰 그림이 약 1초 깜빡이던 것(공개 이슈 76번, 네이버 지도): 새 회전의 첫 item 10이 앞 회전의 마지막 값과 같으면
+//     앞 회전 값으로 보고 한 번 미룬다(put-off, 2초 한도). 카카오내비처럼 새 거리가 옛 번호로 먼저 오면 그 뛴 값을 한 번 붙잡고
+//     (jump-hold, 받아도 곧 회전일 때만) 곧이어 온 새 번호를 바로 받는다(니로 차 로그 2026-11-15)
+//   - 곧 회전 판단 상태를 구성요소마다 둔다(한 갱신에 구성요소가 둘이면 서로 흔들던 것)
+//   - 옆길 비트의 왼쪽 절반을 순정 값에 맞췄다(270도 = 비트 11·칸 36, 전에는 비트 12. 니로 순정 줄 side 2065 dir 270)
 
 import android.content.Context;
 import android.text.format.DateFormat;
@@ -153,7 +159,7 @@ final class CpTurnsFit implements CpTbt {
     String diagKey, laneDiagKey;
     int diagLogs;
     static final int DIAG_LOGS_MAX = 300;
-    /** 마지막 near() 판정의 이유(진단 줄용): in-d(D 안, 곧 회전), hold(D와 D + NEAR_EXIT_MARGIN 사이에서 곧 회전 유지, 1.7.3), no-dist, stale-dist, type(큰 그림 없는 종류), far */
+    /** 마지막 near() 판정의 이유(진단 줄용): in-d(D 안, 곧 회전), hold(D와 D + NEAR_EXIT_MARGIN 사이에서 곧 회전 유지, 1.7.3), no-dist, stale-dist(새 회전인데 이번 갱신에 거리 없음), put-off(새 회전의 거리를 앞 회전의 값으로 보고 미룸, 2.4.4 후보), jump-hold(같은 회전에서 거리가 뛰어 한 번 붙잡음, 2.4.4 후보), type(큰 그림 없는 종류), far */
     String nearWhy = "";
     /** 마지막 near() 판정에 쓴 D(m, 진단 줄용). D를 정하기 전에 판정이 끝났으면 -1 */
     int nearD = -1;
@@ -176,11 +182,10 @@ final class CpTurnsFit implements CpTbt {
      * 순정은 교차로 확대도·표지판 안내가 있을 때만 곧 회전 화면을 쓰고, 폰은 그 정보를 주지 않으므로 가장 가까운 차로 안내로 대신한다.
      */
     final LinkedHashMap<Integer, Integer> laneCounts = new LinkedHashMap<Integer, Integer>();
-    /** 지금 회전의 처음 거리(m)와 그 회전(구성요소·번호·종류). 회전이 바뀌었는지 알아보는 데 쓴다 */
-    String nearKey;
-    int nearFirst;
-    /** 1.7.3(N-3): 이 회전이 곧 회전으로 들어갔다(나올 때는 D + NEAR_EXIT_MARGIN을 넘어야 함). 회전이 바뀌면 풀린다 */
-    boolean nearOn;
+    /*
+     * 곧 회전 판단 상태(이 회전의 열쇠·처음 거리·히스테리시스·미루기)는 구성요소마다 Update에 둔다(2.4.4 후보 리뷰 낮음 3).
+     * 한 갱신에 구성요소가 둘이면 같은 상태를 번갈아 써서 열쇠가 매번 바뀌었다(D를 다시 잡고, 미루기가 섞여 멀리 있음이 끼었다).
+     */
     /** 곧 회전에서 나오는 여유(m). 들어갈 때는 D, 나올 때는 D + 이 값(AA AaTurns와 같음) */
     static final int NEAR_EXIT_MARGIN = 50;
     /**
@@ -195,6 +200,28 @@ final class CpTurnsFit implements CpTbt {
      * 확대 안내 단계 1(NOW, road_guidance_config.bin, FINDINGS "D 값 확정")이다.
      */
     static final int D_MIN = 30;
+    /**
+     * 2.4.4 후보(카카오내비 순서): 같은 회전에서 남은 거리가 이렇게 뛰면 "다음 회전의 거리가 먼저 온 것"으로 보고 한 번 붙잡는다.
+     * 앞 거리가 D_MIN 이하였다가 NEAR_PASS_RISE 넘게 늘거나(회전을 지남), 어디서든 NEAR_NEW_TURN_JUMP 넘게 늘 때. AA(AaTurnsFit)의
+     * 같은 꼴 연속 회전 규칙과 같은 값이다. GPS 흔들림(약 10~20m)은 걸리지 않는다
+     */
+    static final int NEAR_PASS_RISE = 20, NEAR_NEW_TURN_JUMP = 100;
+    /**
+     * 3차 리뷰 중간 2: 앞 값으로 보고 미룬 회전을 폰의 새 item 10 없이 받아들이기까지 기다리는 시간(ms).
+     * 네이버 지도의 실제 거리는 미룬 뒤 약 1초에 왔다(이슈 76번 로그 0.93~0.98초). Dipo의 1초 타이머 refresh()는 마지막 전송 뒤
+     * REFRESH_MS(900ms) 이상일 때 다시 판단하므로 첫 refresh는 미룬 뒤 0.9~1.9초다: 2초면 첫 refresh에서는 풀지 않고 둘째(1.9~2.9초)부터 푼다
+     */
+    static final long PUT_OFF_MAX_MS = 2000L;
+    /**
+     * 4차 리뷰 중간 2: 같은 회전에서 앞 값보다 이만큼(m) 이상 오른 값을 받고 RISE_SKIP_MS 안에 번호가 바뀌면 "다음 회전의 거리가 먼저 온
+     * 것"(카카오내비 순서)으로 보고 미루지 않는다. 카카오내비는 오른 값 뒤 60~140ms에 새 번호를 보냈다(니로 2026-11-15 네 전환:
+     * 130·100·140·60ms). 500ms는 그 3배 남짓이고 폰 갱신 간격(약 1초)보다 짧아 앞 갱신의 오름은 세지 않는다.
+     * 10m: 회전 앞 흔들림(리뷰 예 13 → 15m, 2m)은 걸리지 않고, 카카오의 가까운 다음 회전(3차 리뷰 10 → 28m, 18m)은 걸린다
+     */
+    static final int RISE_SKIP_MIN = 10;
+    static final long RISE_SKIP_MS = 500L;
+    /** 마지막 near()가 "뛴 거리 붙잡기"였다(turn()이 이번 갱신은 계기판에 아무것도 다시 그리지 않음) */
+    boolean nearHeld;
 
     /** 이 회전의 D(m): 위 규칙 */
     static int dynamicD(int base, int first) {
@@ -614,7 +641,7 @@ final class CpTurnsFit implements CpTbt {
         activeId = null;
         sourceWaitAt = 0L;
         searching = 0;
-        nearKey = null;
+        nearForget();
         // 새 경로는 차로 안내 번호를 처음부터 다시 쓴다: 옛 경로의 차로 수를 남기지 않는다(리뷰 3)
         laneCounts.clear();
         clearTurn();
@@ -677,7 +704,7 @@ final class CpTurnsFit implements CpTbt {
         activeId = null;
         sourceWaitAt = 0L;
         laneCounts.clear();
-        nearKey = null;
+        nearForget();
         searching = 0;
         for (LinkedHashMap<Integer, Maneuver> m : maneuvers.values()) {
             if (m != null) m.clear();
@@ -720,7 +747,7 @@ final class CpTurnsFit implements CpTbt {
                     if (m != null) m.clear();
                 }
                 laneCounts.clear();
-                nearKey = null;
+                nearForget();
                 // 옛 HUD 목록은 다시 보내지 않는다. 폰이 SOURCE_WAIT_MS 안에 회전을 다시 주지 않으면 turn()이 지운다(2차 리뷰 1)
                 lastHud = null;
                 sourceWaitAt = t;
@@ -817,6 +844,18 @@ final class CpTurnsFit implements CpTbt {
         if (!was && onActive != null) onActive.run();
         // 곧 회전 화면(M-4): 차로 안내가 있는 회전이 D 안이면 순정 근거리 값, 아니면 멀리 있음 값(막대 무효, M-3)
         int[] near = near(id, u, x, icon);
+        if (nearHeld) {
+            // 2.4.4 후보 재설계: 뛴 거리를 한 번 붙잡는다. 계기판·HUD·막대는 앞 프레임 그대로 두고 아무것도 보내지 않는다
+            // (lastSendAt은 위에서 지금으로 했으므로 refresh()도 REFRESH_MS 동안은 다시 부르지 않는다)
+            if (debug) {
+                try {
+                    diag("CarPlay diag: maneuver " + list[0] + " type " + x.type + " remain " + u.distNext + "m -> held (jump-hold)");
+                } catch (Throwable e) {
+                    // 남기지 않는다
+                }
+            }
+            return;
+        }
         if ((near != null) != nearShown) {
             nearShown = near != null;
             if (maneuverLogs < MANEUVER_LOGS_MAX) {
@@ -877,7 +916,7 @@ final class CpTurnsFit implements CpTbt {
             Dipo.log("CarPlay: route search display " + display);
         }
         searching = display;
-        nearKey = null;
+        nearForget();
         laneCounts.clear();
         nearShown = false;
         cluster.crossroadName("");
@@ -893,6 +932,23 @@ final class CpTurnsFit implements CpTbt {
         hudRoad = null;
     }
 
+    /** 4차 리뷰 중간 1: 같은 회전에서 뛴 값 remain을 지금 받아들이면 곧 회전이 되는지(아래 near()와 같은 판단, 상태는 바꾸지 않음) */
+    boolean staysNear(Maneuver x, int icon, Update u, int remain) {
+        if (nearDisplay(x.type, x.side, x.junction, x.exit, icon) == null) return false;
+        int d = dynamicD(expressway(x.type) ? D_EXPRESSWAY : D_GENERAL, Math.max(u.nearFirst, remain));
+        return remain <= (u.nearOn ? d + NEAR_EXIT_MARGIN : d);
+    }
+
+    /** 모든 구성요소의 곧 회전 판단 상태를 잊는다(경로가 새로 시작됨: 안내 끝·재탐색·이름 돌아옴·모두 잊기, 리뷰 중간 1) */
+    void nearForget() {
+        // 진단 줄의 이유도 비운다(상태 0·탐색 뒤 앞 판단 이유가 남지 않게, 3차 리뷰 낮음)
+        nearWhy = "";
+        nearHeld = false;
+        for (Update u : updates.values()) {
+            if (u != null) u.nearForget();
+        }
+    }
+
     /**
      * 곧 회전 화면 값 {표시 번호, 옆길 비트, 방향 칸(7.5도 단위), 막대(10..90), D} 또는 멀리 있음이면 null(M-4·M-5).
      * 조건(소유자 결정 2026-11-09, 차로 안내 조건 없음): 폰이 다음 회전까지 거리(item 10, m)를 이번 회전에 알려 줌, 곧 회전 화면이 있는 종류(목적지·경유지·출발·페리는 멀리 있음 그대로), 남은 거리 <= D.
@@ -900,37 +956,98 @@ final class CpTurnsFit implements CpTbt {
     int[] near(Integer id, Update u, Maneuver x, int icon) {
         nearWhy = "no-dist";
         nearD = -1;
+        nearHeld = false;
         if (!u.distNextSeen || u.distNext < 0) return null;
         int remain = u.distNext;
         // 이 회전의 처음 거리: 차로가 오기 전부터 센다(폰이 이 회전에 처음 준 거리). 거리가 늘면 새 회전으로 본다
-        String key = id + " " + (u.list == null || u.list.length == 0 ? -1 : u.list[0]) + " " + x.type;
-        boolean newKey = !key.equals(nearKey);
-        // 새 회전인데 이 갱신에 거리(item 10)가 없으면 남은 거리는 앞 회전의 것이다: 판단하지 않는다(리뷰 1)
-        if (newKey && !u.distNextFresh) {
+        String turn = id + " " + (u.list == null || u.list.length == 0 ? -1 : u.list[0]);
+        String key = turn + " " + x.type;
+        boolean newKey = !key.equals(u.nearKey);
+        // 2.4.4 후보 재설계: 앞 판단이 "뛴 거리 붙잡기"였는지. 붙잡기는 한 번뿐이라 여기서 바로 푼다(영원히 멈추지 않음)
+        boolean jumpPending = u.nearJump >= 0;
+        u.nearJump = -1;
+        // 새 회전인데 이 갱신에 거리(item 10)가 없으면 남은 거리는 앞 회전의 것이다: 판단하지 않는다(리뷰 1).
+        // 다만 바로 앞에서 붙잡은 뛴 거리는 이 새 회전의 거리다(카카오내비: 거리가 먼저, 번호가 뒤에): 받아들인다
+        // 3차 리뷰 중간 2: 앞 값으로 보고 미룬 회전은 폰의 새 item 10이 없어도 PUT_OFF_MAX_MS가 지나면 미룬 값을 진짜로 받아들인다
+        // (정차 중 item 10 없는 갱신·refresh만 이어질 때 큰 그림이 영영 안 나오지 않게)
+        boolean putOffOver = key.equals(u.nearPutOff) && now() - u.nearPutOffAt >= PUT_OFF_MAX_MS;
+        if (newKey && !u.distNextFresh && !jumpPending && !putOffOver) {
             nearWhy = "stale-dist";
             return null;
         }
-        if (newKey) nearOn = false;   // 다른 회전: 히스테리시스는 새로 시작(N-3)
-        if (newKey || remain > nearFirst) {
-            nearKey = key;
-            nearFirst = remain;
+        // 2.4.4 후보(베타 3, 공개 이슈 76번 2026-11-15 쏘렌토 MQ4 하이브리드·네이버 지도): 회전이 바뀌는 갱신에 item 10이
+        // 새로 왔어도 값이 앞 회전의 마지막 남은 거리 이하이면 앞 회전의 값으로 보고 이번 갱신은 판단하지 않는다(멀리 있음).
+        // 그대로 받으면 처음 거리가 0~17m로 잡혀 D가 바닥 30m가 되고, 큰 그림이 약 1초 나갔다가 다음 갱신의 실제 거리로 돌아갔다.
+        // 미루기는 회전마다 한 번: 다음에 새로 읽은 item 10은 값이 같아도(진짜로 바로 붙은 회전) 받아들인다.
+        // 회전 번호(구성요소·번호)가 바뀐 때만 미룬다. 같은 번호에서 종류만 바뀐 것은 같은 회전의 정보 갱신이라 거리도 이 회전의 것이다
+        // (미루면 곧 회전 중에 멀리 있음이 한 번 끼어 반대로 깜빡인다).
+        // 재설계(니로 카카오내비 2026-11-15): 앞 회전의 마지막 값이 위로 뛴 값이면(붙잡는 중이거나 붙잡았다가 받아들인 값) 그것은
+        // 이미 다음 회전의 거리다. 미루지 않는다(미루면 카카오내비의 모든 회전 전환에 멀리 있음이 한 번 낀다).
+        boolean turnChanged = u.nearKey == null || !u.nearKey.startsWith(turn + " ");
+        // 4차 리뷰 중간 2: 오른 값은 RISE_SKIP_MIN 넘게 올랐고 RISE_SKIP_MS 안에 번호가 바뀔 때만 다음 회전의 거리로 본다
+        // (회전 앞에서 1~2m 오른 흔들림, 오래전에 오른 값 뒤의 네이버 순서는 그대로 미룸)
+        boolean riseRecent = u.nearLastJump && now() - u.nearRiseAt <= RISE_SKIP_MS;
+        // 5차 리뷰 중간 1: 앞 값과 **같을** 때만 묵은 값으로 본다(이슈 76번 세 전환 15/15·0/0·17/17 모두 같음). "이하"로 두면 진짜로
+        // 가까운 연속 회전(18@40 → 21@35 등)을 미뤄 베타 2보다 나빠진다. 1~2m 다른 묵은 값은 막지 못한다(알려진 한계)
+        if (newKey && turnChanged && !jumpPending && !riseRecent && u.nearPrevLast >= 0 && remain == u.nearPrevLast
+                && !key.equals(u.nearPutOff)) {
+            u.nearPutOff = key;
+            u.nearPutOffAt = now();
+            // 리뷰 높음 1·중간 4: 이 item 10은 앞 회전의 것으로 본다. 1초 타이머 refresh()가 같은 Update로 다시 판단할 때 받아들이지
+            // 않게(위 stale-dist에 걸림), HUD 둘째·셋째 지점도 이 값으로 계산하지 않게 "이번 갱신에 거리 없음"으로 바꾼다.
+            // 폰이 다음 갱신을 보내면 read()가 다시 정한다
+            u.distNextFresh = false;
+            nearWhy = "put-off";
+            return null;
         }
+        // 2.4.4 후보 재설계(니로 카카오내비 2026-11-15 14:01:36): 카카오내비는 회전이 바뀔 때 새 회전의 거리를 옛 회전 번호로 먼저
+        // 보내고 30~130ms 뒤에 새 번호를 같은 거리로 보낸다. 그 갱신으로 지난 회전 그림을 새 거리의 막대(90)로 다시 그리지 않게,
+        // 같은 회전에서 거리가 크게 뛰면 이번 한 번은 계기판을 그대로 두고(turn()이 보내지 않음) 뛴 값을 기억한다.
+        // 곧이어 새 회전이 오면 미루지 않고 그 값으로 받고, 새 회전이 오지 않으면(되돌아감·재탐색 없는 경로 변경) 다음 갱신이나
+        // refresh()에서 지금처럼 D를 늘려 받아들인다.
+        // 4차 리뷰 중간 1: 뛴 값을 받아도 곧 회전이 유지될 때만 붙잡는다. 받으면 멀리 있음이 될 값이면 바로 보낸다
+        // (잘못 나간 큰 그림을 한 번 더 붙잡지 않게. 카카오 6@485처럼 멀리 있음이 바른 출력인 경우도 바로 나감)
+        if (!newKey && u.distNextFresh && !jumpPending && u.nearPrevLast >= 0
+                && ((u.nearPrevLast <= D_MIN && remain > u.nearPrevLast + NEAR_PASS_RISE) || remain > u.nearPrevLast + NEAR_NEW_TURN_JUMP)
+                && staysNear(x, icon, u, remain)) {
+            u.nearJump = remain;
+            nearHeld = true;
+            nearWhy = "jump-hold";
+            return null;
+        }
+        if (newKey) u.nearOn = false;   // 다른 회전: 히스테리시스는 새로 시작(N-3)
+        // 받아들였다: 미루기 상태를 비운다(4차 리뷰 낮음 2). 다른 회전(앞 회전으로 돌아감 등)을 받아들여도 비운다: 남겨 두면 나중에 미룬
+        // 회전이 item 10 없이 오면 2초 한도로 그때의 묵은 값을 받는다(5차 리뷰 낮음 3)
+        u.nearPutOff = null;
+        if (newKey || remain > u.nearFirst) {
+            u.nearKey = key;
+            u.nearFirst = remain;
+        }
+        // 같은 회전에서 앞 값보다 늘어난 값을 받아들였다(붙잡았던 뛴 값이거나 문턱 아래로 조금 늚, 3차 리뷰 중간 1): 그 값은 다음 회전의
+        // 거리가 먼저 온 것일 수 있다(카카오내비 순서, 다음 회전이 가까우면 오름이 20m 이하). 다음 회전이 이 값 이하로 와도 미루지 않는다.
+        // 네이버 지도의 묵은 값은 앞 값과 같아(늘지 않음) 그대로 미룬다
+        // 5차 리뷰 낮음 2: 같은 회전에서 값이 그대로인 중복 갱신은 오름 표시와 그 시각을 그대로 둔다(500ms 한도는 처음 오른 때부터)
+        if (newKey || jumpPending || remain != u.nearPrevLast) {
+            u.nearLastJump = !newKey && (jumpPending || (u.nearPrevLast >= 0 && remain >= u.nearPrevLast + RISE_SKIP_MIN));
+            if (u.nearLastJump) u.nearRiseAt = now();
+        }
+        u.nearPrevLast = remain;
         // 소유자 결정 2026-11-09: 차로 안내 조건을 뺐다(카카오내비는 카플레이로 차로 안내를 보내지 않음). D 안의 회전이면 곧 회전
         int[] disp = nearDisplay(x.type, x.side, x.junction, x.exit, icon);
         nearWhy = "type";
         if (disp == null) return null;
         // 1.7.4(2.4.3): D는 고정이 아니다(dynamicD). 기준은 순정 설정값(일반 350m, 고속도로 출구 1050m), nearFirst는
         // 이 회전에 폰이 처음 준 남은 거리(늘면 늘어남, 다른 회전·재탐색이면 다시 잡음)
-        int d = dynamicD(expressway(x.type) ? D_EXPRESSWAY : D_GENERAL, nearFirst);
+        int d = dynamicD(expressway(x.type) ? D_EXPRESSWAY : D_GENERAL, u.nearFirst);
         nearD = d;
         nearWhy = "far";
         // 1.7.3(N-3): 들어갈 때는 D, 이미 곧 회전이면 D + NEAR_EXIT_MARGIN을 넘어야 나간다(#67 경계에서 그림이 왔다갔다함)
-        if (remain > (nearOn ? d + NEAR_EXIT_MARGIN : d)) {
-            nearOn = false;
+        if (remain > (u.nearOn ? d + NEAR_EXIT_MARGIN : d)) {
+            u.nearOn = false;
             return null;
         }
         nearWhy = remain > d ? "hold" : "in-d";
-        nearOn = true;
+        u.nearOn = true;
         int bits = disp[1] < 0 ? 0 : sideBits(x.angles, disp[1]);
         return new int[] { disp[0], bits, disp[2], bar(remain, d), d };
     }
@@ -957,7 +1074,7 @@ final class CpTurnsFit implements CpTbt {
         diag("CarPlay diag: maneuver " + index + " type " + x.type + " link " + (x.hasLane ? String.valueOf(x.linkedLane) : "-")
                 + " lanes " + (lanes == null ? "-" : String.valueOf(lanes))
                 + " rg lanes " + u.laneIndex + "/" + u.laneCount + "/" + (u.lanesShown ? 1 : 0)
-                + " remain " + (u.distNextSeen ? u.distNext + "m" + (u.distNextFresh ? "" : " old") : "-")
+                + " remain " + (u.distNextSeen ? u.distNext + "m" + (u.distNextFresh || "put-off".equals(nearWhy) ? "" : " old") : "-")
                 + " d " + d + " -> " + (near != null ? "near" : "far") + " (" + nearWhy + "); " + tbt + " dist " + dist);
     }
 
@@ -1010,7 +1127,8 @@ final class CpTurnsFit implements CpTbt {
             case 3: case 5: case 9: dir = 0; break;
             default: return null;   // 0 회전 없음, 10·12·24·25·27 목적지, 11·18 출발, 15~17 페리
         }
-        return exit != 0 ? new int[] { NEAR_TURN, exitBit(exit), exitSlot(exit) } : new int[] { NEAR_TURN, dir / 3, dir };
+        // 2.4.4 후보(나): 종류의 기본 방향도 각도로 옆길 비트를 구한다(왼쪽 36 = 270도 = 비트 11, 칸÷3이 아님)
+        return exit != 0 ? new int[] { NEAR_TURN, exitBit(exit), exitSlot(exit) } : new int[] { NEAR_TURN, streetBit((int) (dir * 7.5f)), dir };
     }
 
     /** 나가는 길의 옆길 비트 번호: 보통 streetBit, 뒤쪽이면 179도 이하 7, 그 밖 8(순정 SetSideStreetBit) */
@@ -1021,24 +1139,32 @@ final class CpTurnsFit implements CpTbt {
         return cw <= 179 ? 7 : 8;
     }
 
-    /** 나가는 길 각도(도, 들어온 방향 기준, 오른쪽 +)의 방향 칸(7.5도 단위): 옆길 비트 n이면 3n, 뒤쪽이면 21·27(순정 SetSideStreetBit) */
+    /**
+     * 나가는 길 각도(도, 들어온 방향 기준, 오른쪽 +)의 방향 칸(7.5도 단위, 비트 칸의 가운데 각도): 오른쪽 비트 n(1~7)이면 3n,
+     * 왼쪽 비트 n(8~14)이면 3(n + 1)(뒤쪽에 비트가 없어 한 칸 당겨짐: 270도 = 비트 11·칸 36, 247.5도 = 비트 10·칸 33),
+     * 뒤쪽이면 21·27(순정 SetSideStreetBit). 2.4.4 후보(나): 전에는 늘 3n이었다
+     */
     static int exitSlot(int exit) {
         int b = streetBit(exit);
-        if (b >= 0) return 3 * b;
+        if (b >= 0) return b <= 7 ? 3 * b : 3 * (b + 1);
         int cw = ((exit % 360) + 360) % 360;
         return cw <= 179 ? 21 : 27;
     }
 
     /**
-     * 각도 하나의 옆길 비트 번호(순정 SetSideStreetBit, 들어온 방향 기준 시계 방향): 직진(348~12도) 0, 그다음 22.5도 칸마다
-     * 1~15(비트 n의 가운데가 약 n x 22.5도). 들어온 길 쪽(180도 ±12도)은 -1(비트 없음).
+     * 각도 하나의 옆길 비트 번호(순정 SetSideStreetBit, 들어온 방향 기준 시계 방향): 직진(348~12도) 0, 들어온 길 쪽(180도 ±12도)은
+     * -1(비트 없음). 오른쪽(12~168도)은 12도부터 22.5도 칸마다 비트 1~7(90도 = 비트 4), 왼쪽(192~348도)은 그 거울로 비트 14~8
+     * (270도 = 비트 11, 247.5도 = 비트 10, 192도 쪽 = 비트 8). 비트 15는 쓰지 않는다.
+     * 2.4.4 후보(나, 니로 순정 줄 side 2065 dir 270·side 1025 dir 247.5, FINDINGS "좌회전 큰 그림의 옆길 비트가 한 칸 어긋남"):
+     * 전에는 왼쪽도 "12도부터 22.5도마다 1~15"로 세어 270도를 비트 12로 보내, 옆길이 22.5도 위쪽에 그려졌다.
+     * 차 로그로 본 비트는 0·1·4·10·11뿐이고, 8·9·12~14의 경계는 이 규칙에서 나온 추정이다.
      */
     static int streetBit(int angle) {
         int cw = ((angle % 360) + 360) % 360;
         if (cw >= 348 || cw <= 12) return 0;
         if (cw > 168 && cw < 192) return -1;
-        int n = (int) ((cw - 12) / 22.5) + 1;
-        return n > 15 ? 15 : n;
+        if (cw < 180) return Math.min(7, (int) ((cw - 12) / 22.5) + 1);
+        return 15 - Math.min(7, (int) ((360 - cw - 12) / 22.5) + 1);
     }
 
     /**
@@ -1564,6 +1690,35 @@ final class CpTurnsFit implements CpTbt {
         boolean distNextFresh;
         /** item 10(다음 회전까지 m)을 한 번이라도 받았는지(곧 회전 화면 판단, M-4) */
         boolean distNextSeen;
+        /** 이 구성요소의 곧 회전 판단 상태: 지금 회전의 열쇠(구성요소·번호·종류)와 처음 거리(m, D 계산) */
+        String nearKey;
+        int nearFirst;
+        /** 1.7.3(N-3): 이 회전이 곧 회전으로 들어갔다(나올 때는 D + NEAR_EXIT_MARGIN을 넘어야 함). 회전이 바뀌면 풀린다 */
+        boolean nearOn;
+        /**
+         * 2.4.4 후보: nearKey 회전에서 받아들인 마지막 남은 거리(m). 새 회전의 첫 item 10이 이 값 이하이면 앞 회전의 값으로 보고 한 번 미룬다.
+         * 경로가 새로 시작되면 -1: 앞 경로의 거리와 견주지 않는다
+         */
+        int nearPrevLast = -1;
+        /** 2.4.4 후보: 처음 거리 판단을 한 번 미룬 회전(같은 회전은 다시 미루지 않음, 경로가 새로 시작되면 비움) */
+        String nearPutOff;
+        /** nearPutOff를 미룬 때(ms, now()). PUT_OFF_MAX_MS가 지나면 새 item 10 없이도 받아들인다 */
+        long nearPutOffAt;
+        /** nearLastJump를 켠 때(ms, now()): RISE_SKIP_MS 안에 번호가 바뀔 때만 미루기를 건너뛴다 */
+        long nearRiseAt;
+        /** 2.4.4 후보 재설계: 같은 회전에서 뛰어 한 번 붙잡은 남은 거리(m, 없으면 -1). 다음 판단에서 풀린다 */
+        int nearJump = -1;
+        /** 2.4.4 후보 재설계: nearPrevLast가 붙잡았다가 받아들인 뛴 값이다(다음 회전을 앞 값으로 보고 미루지 않음) */
+        boolean nearLastJump;
+
+        void nearForget() {
+            nearKey = null;
+            nearOn = false;
+            nearPrevLast = -1;
+            nearPutOff = null;
+            nearJump = -1;
+            nearLastJump = false;
+        }
         String road, destination, distLeftStr, nextStr, sourceName;
         long eta, timeLeft;
         int[] list;
@@ -1599,6 +1754,7 @@ final class CpTurnsFit implements CpTbt {
             lanesShown = false;
             sourceName = "";
             supports = false;
+            nearForget();
         }
 
         /** the fields this message carries (by iAP2 type: 1/5 uint8/16, 2/6 uint32, 3/7 uint64, 8 enum, 9 bool, 10 string) */

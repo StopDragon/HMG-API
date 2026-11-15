@@ -17,6 +17,8 @@ package hmgapi.mods.wireless;
 //   설정 aa_name_hold를 뺐다.
 // Korea Projection 1.7.4(2026-11-15, 모드 2.4.3, 계획 D-20 "순정 상태 + 현대·기아 내비에 맞춘 보정"): 설정 tbt_fit(기본 켬)이면
 //   보정 층(AaTurnsFit·CpTurnsFit, TrapBar)을 쓰고 aa_name_hold를 되살렸다. tbt_fit을 끄면 2.4.2와 같다(AaTurns·CpTurns, 막대 없음).
+// Korea Projection 1.7.4(2026-11-16, 모드 2.4.5): 순정 무선 앱(PhoneProjection)의 별표 키 안내 팝업(GLOBAL_POPUP)을 순정 무선
+//   등록 기기가 없을 때 건너뛴다(PopupSkip, 설정 star_popup_skip 기본 켬). 니로에서 이 팝업이 카플레이 화면을 덮은 뒤 화면·키가 묶였다.
 
 import android.content.ComponentName;
 import android.content.Context;
@@ -106,6 +108,8 @@ public final class Wireless extends ModEntry {
         if ((GPM.equals(app.packageName) || AaWifi.PHONEPROJ.equals(app.packageName)) && mod.settingBoolean("aa_ap", true)) AaWifi.hook(mod, app);
         // 한국 차 빌드 1.7.3(A-1): PP가 늦게 떠서 버려진 무선 AA 준비(1)를 PP가 뜬 뒤 다시 보낸다
         if (GPM.equals(app.packageName)) aaReady(mod, app, mod.settingBoolean("aa_ready_resend", true));
+        // 한국 차 빌드 1.7.4(2.4.5): 별표 키 안내 팝업 건너뛰기(순정 무선 등록 기기가 없을 때만)
+        if (PopupSkip.PHONEPROJ.equals(app.packageName)) popupSkip(mod, app, mod.settingBoolean("star_popup_skip", true));
         if (DIPO.equals(app.packageName) && (mod.settingBoolean("tbt", true) || mod.settingBoolean("bridge", true) || mod.settingBoolean("audio", true))) dipo(mod, app);
     }
 
@@ -472,6 +476,79 @@ public final class Wireless extends ModEntry {
             @Override
             protected void afterHookedMethod(Param p) {}
         });
+    }
+
+    /** PopupSkip 훅을 이 프로세스에서 이미 봤다(한 번만) */
+    private static boolean popupSkipDone;
+
+    /**
+     * 1.7.4(2.4.5): PhoneProjection의 WirelessPhoneProjectionReceiver.onReceive 앞에서 GLOBAL_POPUP이고 순정 무선 등록
+     * 기기가 없으면 원래 메서드를 부르지 않는다(PopupSkip). 설정이 꺼져 있으면 훅을 걸지 않는다. HMG-API 지도에 없는
+     * 공개 이름이라 Hooks로 직접 건다. 클래스·메서드가 없으면 한 줄 남기고 순정 그대로 둔다.
+     */
+    private static synchronized void popupSkip(final ModContext mod, final LoadedApp app, boolean setting) {
+        if (popupSkipDone) return;
+        popupSkipDone = true;
+        final PopupSkip.Log log = new PopupSkip.Log() {
+            @Override
+            public void line(String s) {
+                mod.log(s);
+            }
+        };
+        PopupSkip.install(setting, new PopupSkip.Installer() {
+            @Override
+            public void install() throws Throwable {
+                Hooks.findAndHookMethod(Class.forName(PopupSkip.RECEIVER, false, app.classLoader), "onReceive", Context.class, Intent.class, new MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(Param p) {
+                        try {
+                            final Context ctx = (Context) p.args[0];
+                            final Intent intent = (Intent) p.args[1];
+                            final String action = intent == null ? null : intent.getAction();
+                            if (PopupSkip.skip(mod.enabled(), action, new PopupSkip.Devices() {
+                                @Override
+                                public int count() {
+                                    return deviceCount(ctx);
+                                }
+                            }, log)) p.setResult(null);
+                        } catch (Throwable t) {
+                            // 판단 중 예외면 순정 그대로(원래 메서드를 부른다)
+                        }
+                    }
+                });
+            }
+        }, log);
+    }
+
+    /**
+     * 순정 무선 등록 기기(device_list) 전체 줄 수. 못 읽으면 -1. ContentResolver.query(Uri, null, null, null, null)를
+     * 반사로 부른다(PC 시험의 가짜 안드로이드 클래스를 늘리지 않으려고, 차에서는 직접 부르는 것과 같다).
+     */
+    private static int deviceCount(Context ctx) {
+        if (ctx == null) return -1;
+        Object c = null;
+        Class<?> cursor = null;
+        try {
+            // 메서드는 공개 형(Context·ContentResolver·Cursor)에서 찾는다. 실제 객체의 클래스는 비공개일 수 있다.
+            Object cr = Class.forName("android.content.Context").getMethod("getContentResolver").invoke(ctx);
+            Class<?> uriClass = Class.forName("android.net.Uri");
+            Object uri = uriClass.getMethod("parse", String.class).invoke(null, PopupSkip.DEVICES);
+            c = Class.forName("android.content.ContentResolver")
+                    .getMethod("query", uriClass, String[].class, String.class, String[].class, String.class)
+                    .invoke(cr, uri, null, null, null, null);
+            if (c == null) return -1;
+            cursor = Class.forName("android.database.Cursor");
+            return ((Integer) cursor.getMethod("getCount").invoke(c)).intValue();
+        } catch (Throwable t) {
+            return -1;
+        } finally {
+            if (c != null) {
+                try {
+                    (cursor != null ? cursor : Class.forName("android.database.Cursor")).getMethod("close").invoke(c);
+                } catch (Throwable ignored) {
+                }
+            }
+        }
     }
 
     /** AaReady 훅이 이 프로세스에 걸렸다(한 번만) */

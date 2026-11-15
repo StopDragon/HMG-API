@@ -69,6 +69,14 @@
       "apply": "restart",
       "title": "Android Auto cluster: keep the turn icon when the phone sends a road name change for the same point",
       "description": "Korean build, with the fitted turn-by-turn on. When the phone alternates a turn and a road name change for the same point, the cluster keeps the turn icon and only the road name changes. Off: name changes show at once."
+    },
+    {
+      "key": "star_popup_skip",
+      "type": "toggle",
+      "default": true,
+      "apply": "restart",
+      "title": "Star key: skip the stock phone projection hint popup",
+      "description": "Korean build. A hook in the phone projection app (no files changed): the star key set to the phone projection shortcut no longer opens the stock 'how to connect' popup while no phone is registered in the stock wireless list. It could cover the CarPlay screen and freeze the screen and keys. With a registered phone the stock device list popup stays. Off: stock."
     }
   ]
 }
