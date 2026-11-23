@@ -131,7 +131,7 @@ final class AaTurnsFit implements AaTbt {
     static final int STATUS_ACTIVE = 1, STATUS_REROUTING = 3, DISPLAY_RESEARCH = 10;
     /** 곧 회전 D(m): 순정 교차로 확대 안내 단계 5 + MarginalDist 50(차-1). 차 속도는 모드에서 못 읽어 보정하지 않는다 */
     static final int D_GENERAL = 350, D_EXPRESSWAY = 1050;
-    static final int NEAR_TURN = 13, NEAR_UTURN = 31, NEAR_EXIT_RIGHT = 17, NEAR_EXIT_LEFT = 18, NEAR_FORK = 25;
+    static final int NEAR_TURN = 13, NEAR_UTURN = 31, NEAR_EXIT_RIGHT = 17, NEAR_EXIT_LEFT = 18;
     /** 마지막 차로 프레임의 차로 수(이벤트 34). 1 이상이면 이 회전에 차로 안내가 있다(M-12) */
     int laneCount;
     /** 다음 회전까지 남은 거리(m, 폰 값 그대로, 없으면 -1)와 이 회전의 열쇠(곧 회전 판단) */
@@ -875,6 +875,9 @@ final class AaTurnsFit implements AaTbt {
         }
         nearOn = true;
         int bits = disp[1] < 0 ? 0 : 1 << disp[1];
+        // 1.8.0(2.4.7): 갈림의 다른 길 비트는 카플레이와 같은 규칙(오른쪽 직진 비트 0, 왼쪽 22.5도 비트 1, 순정과 같음)
+        // (CpTurnsFit.forkOtherBit과 같은 값. 패키지가 달라 여기에 그대로 둔다)
+        if (event == FORK) bits |= turnSide == LEFT ? 1 << 1 : 1;
         return new int[] { disp[0], bits, disp[2], bar(remainMeters, d), d };
     }
 
@@ -906,7 +909,7 @@ final class AaTurnsFit implements AaTbt {
 
     /**
      * 곧 회전 {표시 번호, 나가는 길 옆길 비트 번호(-1: 옆길 없음), 방향 칸} 또는 곧 회전 화면이 없는 회전이면 null. 순정 SetCase*:
-     * 회전 13(방향: 약간 6/42, 보통 12/36, 급 18/30, 직진 0), 유턴 31(오른쪽 통행 36), 출구 17/18(12/36), Y자 갈림 25,
+     * 회전 13(방향: 약간 6/42, 보통 12/36, 급 18/30, 직진 0), 유턴 31(오른쪽 통행 36), 출구 17/18(12/36), 갈림 13(약간 3/45, 1.8.0 전에는 Y자 25),
      * 회전교차로는 출구 아이콘 그대로(방향은 출구 각도). 방향을 모르는 회전(아이콘 64), 이름 바뀜·출발·목적지·페리는 멀리 있음.
      */
     static int[] nearDisplay(int ev, int side, int displayType, int direction) {
@@ -928,8 +931,11 @@ final class AaTurnsFit implements AaTbt {
             case OFF_RAMP:
                 return side == LEFT ? new int[] { NEAR_EXIT_LEFT, -1, 36 } : new int[] { NEAR_EXIT_RIGHT, -1, 12 };
             case FORK:
+                // 1.8.0: Y자 25가 아니라 회전 13 + 비스듬한 방향(오른쪽 22.5도 = 칸 3·비트 1, 왼쪽 337.5도 = 칸 45·비트 14).
+                // 다른 길 비트(오른쪽 갈림 직진 0, 왼쪽 갈림 22.5도 1)는 near()가 더한다. 근거: 니로 순정 운행 2026-11-17·11-20
+                // (오른쪽 갈림 13, dir 22.5, side 3 / 왼쪽 갈림 13, dir 337.5, side 16386, 25는 없음)
                 if (side != LEFT && side != RIGHT) return null;
-                return new int[] { NEAR_FORK, -1, side == RIGHT ? 6 : 42 };
+                return side == RIGHT ? new int[] { NEAR_TURN, 1, 3 } : new int[] { NEAR_TURN, 14, 45 };
             case ROUNDABOUT_ENTER_AND_EXIT: {
                 // 회전교차로: 출구 아이콘 그대로, 방향은 출구 각도(setRoundaboutType의 direction, 시계 방향)
                 if (displayType == 64 || displayType <= 0) return null;

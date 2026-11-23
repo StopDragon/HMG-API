@@ -112,6 +112,32 @@ final class CpTurnsFit implements CpTbt {
     long sourceWaitAt;
     static final long SOURCE_WAIT_MS = 10000L;
     static final int SOURCE_KEEP = 4;
+    /**
+     * 2.4.7(#465·#450): 폰이 지금 회전 번호(120)는 주는데 그 회전 내용(121)을 받지 못했을 때 길안내를 다시 요청한다
+     * (앱을 바꿀 때와 같은 Stop·Start: 폰이 현재 상태 전체를 다시 보낸다). 처음 본 뒤 UNKNOWN_WAIT_MS가 지나도 모를 때만
+     * (새 경로는 120이 121보다 먼저 올 수 있다), 같은 번호에는 한 번, 요청 사이 UNKNOWN_GAP_MS 이상, 연결 한 번(끊김·앱 바뀜까지)에
+     * 많아야 UNKNOWN_ASKS_MAX번. 다른 다시 요청(RgAsk 등)이 진행 중이면(busy) 양보한다. 예약은 두지 않는다(폰의 120이 올 때만 본다)
+     */
+    static final long UNKNOWN_WAIT_MS = 3000L;
+    static final long UNKNOWN_GAP_MS = 30000L;
+    static final int UNKNOWN_ASKS_MAX = 3;
+    /** 지금 모르는 회전 번호(-1이면 없음)와 처음 본 때 */
+    int unknownIdx = -1;
+    long unknownSince;
+    /** 이번 경로에서 이미 요청한 번호(경로가 끝나면 비움, 많아야 UNKNOWN_ASKS_MAX개) */
+    final java.util.HashSet<Integer> unknownAsked = new java.util.HashSet<Integer>();
+    /** 이번 연결에서 요청한 횟수와 마지막 요청 시각(0이면 없음), 한도에 닿은 줄을 남겼는지 */
+    int unknownAsks;
+    long unknownAskAt;
+    boolean unknownStopLogged;
+
+    /** Dipo가 정한다: 다른 다시 요청이 진행 중이거나 막 있었으면 true(그때는 이쪽이 요청하지 않는다) */
+    interface Busy {
+        boolean busy();
+    }
+
+    Busy busy;
+
     /** T-5 ①(1.7.4): 첫 출처 이름 디버그 줄 수(프로세스당) */
     int sourceLogs;
     static final int SOURCE_LOGS_MAX = 20;
@@ -259,8 +285,8 @@ final class CpTurnsFit implements CpTbt {
     static final int STATE_LOADING = 3, STATE_REROUTING = 5, DISPLAY_SEARCH = 9, DISPLAY_RESEARCH = 10;
     /** 곧 회전 화면을 쓰기 시작하는 거리 D(m): 순정 교차로 확대 안내 단계 5 + MarginalDist 50(차-1 설정 파일) */
     static final int D_GENERAL = 350, D_EXPRESSWAY = 1050;
-    /** 곧 회전 표시 번호(순정 SetCase*): 회전 지점 13, 유턴 31, 고속도로 오른쪽·왼쪽 출구 17·18, Y자 갈림 25 */
-    static final int NEAR_TURN = 13, NEAR_UTURN = 31, NEAR_EXIT_RIGHT = 17, NEAR_EXIT_LEFT = 18, NEAR_FORK = 25;
+    /** 곧 회전 표시 번호(순정 SetCase*): 회전 지점 13, 유턴 31, 고속도로 오른쪽·왼쪽 출구 17·18. 갈림도 13(1.8.0, 전에는 Y자 25) */
+    static final int NEAR_TURN = 13, NEAR_UTURN = 31, NEAR_EXIT_RIGHT = 17, NEAR_EXIT_LEFT = 18;
 
     long now() {
         return clock >= 0L ? clock : android.os.SystemClock.elapsedRealtime();
@@ -627,8 +653,52 @@ final class CpTurnsFit implements CpTbt {
         return a <= 157 ? 6 : 5;
     }
 
+    /**
+     * 2.4.7: 회전 번호 idx의 내용을 모른다(turn()이 부름, 폰의 갱신마다). 한도 안이면 길안내를 다시 요청한다(UNKNOWN_* 설명).
+     * 요청은 restart 스레드 하나로 바로 하고, 예약은 남기지 않는다. 줄에는 숫자만 남긴다
+     */
+    void unknownTurn(int idx, long t) {
+        if (idx != unknownIdx) {
+            unknownIdx = idx;
+            unknownSince = t;
+            return;
+        }
+        if (t - unknownSince < UNKNOWN_WAIT_MS || unknownAsked.contains(idx) || restart == null) return;
+        if (unknownAsks >= UNKNOWN_ASKS_MAX) {
+            if (!unknownStopLogged) {
+                unknownStopLogged = true;
+                Dipo.log("CarPlay: maneuver " + idx + " still unknown after " + unknownAsks + " asks, not asking again until the next connection");
+            }
+            return;
+        }
+        if (unknownAskAt != 0L && t - unknownAskAt < UNKNOWN_GAP_MS) return;
+        Busy b = busy;
+        if (b != null && b.busy()) return;
+        unknownAsked.add(idx);
+        unknownAsks++;
+        unknownAskAt = t;
+        Dipo.log("CarPlay: maneuver " + idx + " unknown for " + (t - unknownSince) / 1000L + " s, route guidance asked again ("
+                + unknownAsks + "/" + UNKNOWN_ASKS_MAX + ")");
+        new Thread(restart, "hmgapi-cp-rg-restart").start();
+    }
+
+    /** 2.4.7: 경로가 끝남(번호를 다시 쓴다): 모르는 번호와 요청한 번호만 잊는다. 횟수·간격은 연결 단위로 남긴다 */
+    void unknownRouteDone() {
+        unknownIdx = -1;
+        unknownAsked.clear();
+    }
+
+    /** 2.4.7: 연결이 끝났거나 앱이 바뀜: 횟수까지 처음부터 */
+    void unknownForget() {
+        unknownRouteDone();
+        unknownAsks = 0;
+        unknownAskAt = 0L;
+        unknownStopLogged = false;
+    }
+
     /** the iAP2 session ended (DiPO e/u.disconnected) */
     public void disconnected() {
+        unknownForget();
         reset();
         recentSources.clear();
         clearTurn();
@@ -640,6 +710,7 @@ final class CpTurnsFit implements CpTbt {
     public void stop() {
         activeId = null;
         sourceWaitAt = 0L;
+        unknownRouteDone();
         searching = 0;
         nearForget();
         // 새 경로는 차로 안내 번호를 처음부터 다시 쓴다: 옛 경로의 차로 수를 남기지 않는다(리뷰 3)
@@ -756,6 +827,7 @@ final class CpTurnsFit implements CpTbt {
             }
             Dipo.log("CarPlay: route guidance source changed from " + was + " to " + s + ", clearing turn-by-turn");
             reset();
+            unknownForget();
             // 앞 앱의 막대를 남기지 않는다(리뷰 7)
             barOut.send(context, PhoneBarOut.NONE, now());
             hudBlank();
@@ -813,9 +885,13 @@ final class CpTurnsFit implements CpTbt {
                 sourceWaitAt = 0L;
                 clearTurn();
                 hudBlank();
+            } else if (sourceWaitAt == 0L && list != null && list.length > 0) {
+                unknownTurn(list[0], t);
             }
             return;
         }
+        // 아는 회전이 왔다: 모르는 번호를 잊는다(리뷰: 같은 번호가 나중에 다시 모르게 되면 3초를 처음부터 기다리게)
+        unknownIdx = -1;
         sourceWaitAt = 0L;
         int unit;
         switch (u.nextUnits) {
@@ -1049,6 +1125,10 @@ final class CpTurnsFit implements CpTbt {
         nearWhy = remain > d ? "hold" : "in-d";
         u.nearOn = true;
         int bits = disp[1] < 0 ? 0 : sideBits(x.angles, disp[1]);
+        // 1.8.0(2.4.7): 갈림의 다른 길 비트는 순정과 같게 넣는다. 폰이 다른 길 각도를 주지 않아도 넣는다.
+        // 오른쪽 갈림(14)은 직진 비트 0(순정 side 3 = 비트 0·1), 왼쪽 갈림(13)은 오른쪽 22.5도 비트 1(순정 side 16386 = 비트 1·14,
+        // 직진 비트 없음). 근거: 니로 순정 운행 2026-11-17·11-20, 왼쪽 갈림 세 번 모두 16386
+        if (fork(x.type)) bits |= forkOtherBit(x.type == 13);
         return new int[] { disp[0], bits, disp[2], bar(remain, d), d };
     }
 
@@ -1087,6 +1167,19 @@ final class CpTurnsFit implements CpTbt {
         return b * 10;
     }
 
+    /** 갈림(iAP2 ManeuverType 13 왼쪽 유지, 14 오른쪽 유지): 곧 회전 그림은 13, 옆길에 다른 길 비트를 더한다(1.8.0) */
+    static boolean fork(int type) {
+        return type == 13 || type == 14;
+    }
+
+    /**
+     * 갈림의 다른 길 옆길 비트(값): 왼쪽 갈림이면 오른쪽 22.5도(비트 1), 오른쪽 갈림이면 직진(비트 0).
+     * 순정 니로 운행(2026-11-17·11-20): 오른쪽 갈림 side 3(비트 0·1), 왼쪽 갈림 side 16386(비트 1·14). AA(AaTurnsFit)도 이것을 쓴다
+     */
+    static int forkOtherBit(boolean left) {
+        return left ? 1 << 1 : 1;
+    }
+
     /** D를 고속도로 값(1050m)으로 쓰는 종류: 고속도로 출구·출구 램프·고속도로 바꾸기(iAP2는 도로 종류를 주지 않음) */
     static boolean expressway(int type) {
         return type == 8 || type == 22 || type == 23 || type == 51 || type == 52 || type == 53;
@@ -1094,8 +1187,8 @@ final class CpTurnsFit implements CpTbt {
 
     /**
      * 곧 회전 {표시 번호, 나가는 길 옆길 비트 번호(-1: 옆길 없음), 방향 칸} 또는 곧 회전 화면이 없는 종류면 null.
-     * 순정 SetCase*: 고속도로 출구 17/18(방향 12·36), 유턴 31(오른쪽 통행 36, 왼쪽 통행 12), Y자 갈림 25, 회전교차로는 출구
-     * 아이콘 그대로, 그 밖의 회전 지점 13. 방향은 나가는 길 칸(각도가 없으면 종류의 기본 방향). 고가·지하차도(43~46)·
+     * 순정 SetCase*: 고속도로 출구 17/18(방향 12·36), 유턴 31(오른쪽 통행 36, 왼쪽 통행 12), 회전교차로는 출구
+     * 아이콘 그대로, 그 밖의 회전 지점과 갈림 13(1.8.0, 전에는 갈림을 Y자 25로 보냄). 방향은 나가는 길 칸(각도가 없으면 종류의 기본 방향). 고가·지하차도(43~46)·
      * 터널·톨은 iAP2에 해당 종류가 없다. "바로 다음 안내와 겹침"(19/20)은 폰 정보로 정할 수 없어 쓰지 않는다.
      */
     static int[] nearDisplay(int type, int side, int junction, int exit, int icon) {
@@ -1107,8 +1200,20 @@ final class CpTurnsFit implements CpTbt {
                 return left ? new int[] { NEAR_EXIT_LEFT, -1, 36 } : new int[] { NEAR_EXIT_RIGHT, -1, 12 };
             }
             case 4: case 26: return new int[] { NEAR_UTURN, -1, side == 1 ? 12 : 36 };
-            case 13: return new int[] { NEAR_FORK, -1, exit != 0 ? exitSlot(exit) : 42 };
-            case 14: return new int[] { NEAR_FORK, -1, exit != 0 ? exitSlot(exit) : 6 };
+            // 1.8.0: 갈림(13 왼쪽 유지, 14 오른쪽 유지)은 Y자 25가 아니라 회전 13 + 비스듬한 방향(왼쪽 337.5도 = 칸 45·비트 14,
+            // 오른쪽 22.5도 = 칸 3·비트 1)이다. 옆길에는 다른 길 비트를 더한다(near(), forkOtherBit: 오른쪽 갈림 직진 비트 0,
+            // 왼쪽 갈림 22.5도 비트 1). 근거: 니로 순정 운행 2026-11-17·11-20. 오른쪽 갈림은 13, dir 22.5, side 3(직진 + 22.5도),
+            // 왼쪽 갈림은 13, dir 337.5, side 16386(22.5도 + 337.5도, 직진 없음, 세 번 모두)이었고 25는 한 번도 없었다
+            // 리뷰 중간 1: 폰의 나가는 길 각도는 그 쪽 비스듬한 범위(왼쪽 비트 12~14, 오른쪽 비트 1~3)일 때만 쓴다. 직진·반대쪽·뒤쪽
+            // 각도면 갈림이 직진이나 반대쪽 화살표로 보이므로 기본값(337.5도·22.5도)을 쓴다
+            case 13: {
+                int b = exit != 0 ? streetBit(exit) : -1;
+                return b >= 12 && b <= 14 ? new int[] { NEAR_TURN, b, exitSlot(exit) } : new int[] { NEAR_TURN, 14, 45 };
+            }
+            case 14: {
+                int b = exit != 0 ? streetBit(exit) : -1;
+                return b >= 1 && b <= 3 ? new int[] { NEAR_TURN, b, exitSlot(exit) } : new int[] { NEAR_TURN, 1, 3 };
+            }
             default: break;
         }
         if (junction == 1 || type == 6 || type == 7 || type == 19 || (type >= 28 && type <= 46)) {

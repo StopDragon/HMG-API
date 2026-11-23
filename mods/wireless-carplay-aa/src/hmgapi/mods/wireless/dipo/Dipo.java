@@ -70,6 +70,8 @@ public final class Dipo {
     static Handler turnsHandler;
     static CpTbt turns;
     static RgListener rg;
+    /** 1.8.0(모드 2.4.7): iAP2가 카플레이 채널로 넘어간 뒤 길안내 다시 요청(RgAsk). 길안내와 브리지가 둘 다 켜졌을 때만 */
+    static volatile RgAsk rgAsk;
     /** set while HMG-API itself calls the iAP2 server (its own route guidance restart) */
     static final ThreadLocal<Boolean> OWN = new ThreadLocal<Boolean>();
     /** onSessionDetails' device id while it runs, and whether its address lookup came back empty */
@@ -154,11 +156,47 @@ public final class Dipo {
         // Korea Projection 1.7.4(2.4.3): 설정 tbt_fit(기본 켬)이면 보정 층(CpTurnsFit), 끄면 순정 DiPO 그대로(CpTurns, 2.4.2).
         // 디버그 로그가 켜졌으면 진단 줄을 남긴다(숫자만)
         turns = CpTurnsFit.make(fit, app.context, c, restart, onActive, debug);
+        // 2.4.7: 모르는 회전 번호의 다시 요청은 RgAsk가 기다리는 중이거나 다른 다시 요청이 막 있었으면 양보한다(요청이 쌓이지 않게)
+        if (turns instanceof CpTurnsFit) ((CpTurnsFit) turns).busy = new CpTurnsFit.Busy() {
+            @Override
+            public boolean busy() {
+                RgAsk a = rgAsk;
+                if (a != null && a.busy()) return true;
+                long at = lastRestartAt;
+                return at != 0L && android.os.SystemClock.elapsedRealtime() - at < RESTART_QUIET_MS;
+            }
+        };
         rg = new RgListener();
+        if (bridge) rgAsk = new RgAsk(new RgAsk.Host() {
+            @Override
+            public void schedule(Runnable r, long ms) {
+                Handler h = turnsHandler;
+                if (h != null) h.postDelayed(r, ms);
+            }
+
+            @Override
+            public void ask(final RgAsk.Still still) {
+                // Stop·잠깐·Start는 200ms를 기다리므로 길안내 스레드를 막지 않게 따로 돈다(앱이 바뀔 때의 다시 요청과 같음)
+                new Thread(new Runnable() {
+                    @Override
+                    public void run() {
+                        restartRouteGuidance(still);
+                    }
+                }, "hmgapi-cp-rg-ask").start();
+            }
+
+            @Override
+            public void log(String m) {
+                Dipo.log(m);
+            }
+        });
         mod.hook(app.classLoader, "dipo.iap2_proxy.stop_route_guidance", new MethodHook() {
             @Override
             protected void beforeHookedMethod(Param p) {
                 if (OWN.get() != null) return;
+                // DiPO가 스스로 길안내를 멈춤: 다시 요청도 멈춘다(1.8.0)
+                RgAsk a = rgAsk;
+                if (a != null) a.reset();
                 post(new Runnable() {
                     @Override
                     public void run() {
@@ -214,18 +252,47 @@ public final class Dipo {
 
     /** after a source change: Stop, then Start, so the phone sends its whole current state (the build's HmgApiRgRestart) */
     static void restartRouteGuidance() {
+        restartRouteGuidance(null);
+    }
+
+    /** still이 있으면 Stop 뒤 Start 전에 묻고, 아니면 Start를 보내지 않는다(1.8.0 RgAsk) */
+    static void restartRouteGuidance(RgAsk.Still still) {
         IIap2Service s = iap2;
         if (s == null) return;
-        OWN.set(Boolean.TRUE);
-        try {
-            s.Iap2SvcStopRouteGuidanceUpdate(RG_COMPONENTS);
-            Thread.sleep(200);
-            s.Iap2SvcStartRouteGuidanceUpdate(RG_COMPONENTS, true, true);
-        } catch (Throwable t) {
-            // the session went away meanwhile
-        } finally {
-            OWN.remove();
+        // 2.4.7: 다시 요청(앱 바뀜·RgAsk·모르는 회전)은 한 번에 하나씩: Stop·Start가 서로 끼어들지 않게 한다.
+        // 시각은 잠금 전에 적는다(리뷰: 잠금을 기다리는 요청도 "진행 중"으로 보이게)
+        lastRestartAt = android.os.SystemClock.elapsedRealtime();
+        synchronized (RESTART_LOCK) {
+            OWN.set(Boolean.TRUE);
+            try {
+                s.Iap2SvcStopRouteGuidanceUpdate(RG_COMPONENTS);
+                Thread.sleep(200);
+                if (still != null && !still.still()) return;
+                s.Iap2SvcStartRouteGuidanceUpdate(RG_COMPONENTS, true, true);
+            } catch (Throwable t) {
+                // the session went away meanwhile
+            } finally {
+                OWN.remove();
+            }
         }
+    }
+
+    /** 2.4.7: 다시 요청을 한 줄로 세우는 잠금과 마지막 다시 요청을 시작한 때(elapsedRealtime, 0이면 없음) */
+    static final Object RESTART_LOCK = new Object();
+    static volatile long lastRestartAt;
+    /** 2.4.7: 다른 다시 요청 뒤 이만큼은 모르는 회전 번호로 다시 요청하지 않는다(폰이 121을 다시 보낼 틈) */
+    static final long RESTART_QUIET_MS = 10000L;
+
+    /** 1.8.0(Bridge): 카플레이 채널 세션의 식별이 수락됨. 길안내를 다시 요청하기 시작한다(세션마다 한 번) */
+    static void cpChannelReady() {
+        RgAsk a = rgAsk;
+        if (a != null) a.ready();
+    }
+
+    /** 1.8.0(Bridge): 카플레이 채널 세션이 끝남. 다시 요청 예약을 모두 무효로 한다 */
+    static void cpChannelGone() {
+        RgAsk a = rgAsk;
+        if (a != null) a.reset();
     }
 
     /** HMG-API's iAP2 listener for route guidance: everything goes to CpTurns on its thread */
@@ -248,6 +315,9 @@ public final class Dipo {
         @Override
         public void notify(final int what, int a1, int a2, final Iap2NotiMsg msg) {
             if ((what != RG_UPDATE && what != RG_MANEUVER && what != RG_LANES) || msg == null) return;
+            // 1.8.0: 길안내가 왔다(차로 안내 122만으로는 판단하지 않는다)
+            RgAsk a = rgAsk;
+            if (a != null && what != RG_LANES) a.heard();
             post(new Runnable() {
                 @Override
                 public void run() {

@@ -466,6 +466,42 @@ public final class CpTurnsTest {
     }
 
     /**
+     * 1.8.0: 갈림(13 왼쪽 유지, 14 오른쪽 유지)의 곧 회전은 순정처럼 회전 13 + 비스듬한 방향 + 다른 길 비트다
+     * (2.4.7: 오른쪽 갈림은 직진 비트 0, 왼쪽 갈림은 오른쪽 22.5도 비트 1).
+     * 근거: 니로 순정 운행 2026-11-17·11-20. 오른쪽 갈림 "tbt icon 13 side 3 dir 22.5", 왼쪽 갈림 "tbt icon 13 side 16386 dir 337.5"
+     * (세 번 모두, 직진 비트 없음), 25는 없음.
+     */
+    static void forkLikeStock() {
+        Car.unit = Car.DISTANCE_KM;
+        int[][] cases = { { 14, 0 }, { 13, 0 }, { 14, 45 }, { 14, 8 }, { 14, -20 }, { 13, 20 }, { 13, -45 } };
+        String[] want = { "tbt 13 3 22.5 300.0 ", "tbt 13 16386 337.5 300.0 ", "tbt 13 5 45.0 300.0 ",
+                "tbt 13 3 22.5 300.0 ", "tbt 13 3 22.5 300.0 ", "tbt 13 16386 337.5 300.0 ", "tbt 13 8194 315.0 300.0 " };
+        String[] why = { "keep right, no angle: side 3 (straight + 22.5), dir 22.5 (stock)",
+                "2.4.7 keep left, no angle: side 16386 (22.5 = bit 1 + 337.5 = bit 14, no straight bit, stock), dir 337.5",
+                "keep right with the phone's exit angle 45: that angle (bit 2, dir 45.0) plus the straight bit",
+                "review M1: keep right with a straight angle 8: the default 22.5, not a straight arrow",
+                "review M1: keep right with a left angle -20: the default 22.5, not a left arrow",
+                "review M1: keep left with a right angle 20: the default 337.5 (side 16386)",
+                "2.4.7 keep left with the phone's exit angle -45: bit 13, dir 315.0 plus the 22.5 bit (not straight)" };
+        for (int k = 0; k < cases.length; k++) {
+            c = new Cluster();
+            CpTurnsFit t = new CpTurnsFit(new android.content.Context(), c, null);
+            t.clock = 31000000L + k * 1000000L;
+            t.maneuver(nearManeuver(0, cases[k][0], 0, 0, cases[k][1], null, -1, "Fork Rd"));
+            t.routeGuidance(rgAt(1, 300));
+            String l = last("tbt ");
+            check("1.8.0 fork near like stock: " + why[k] + " (got " + l + ")", l != null && l.startsWith(want[k]) && !c.calls.toString().contains("tbt 25 "));
+        }
+        // 멀리(D 밖)는 전과 같다: 오른쪽 유지 66, 왼쪽 유지 71(순정 운행에서도 66·71)
+        c = new Cluster();
+        CpTurnsFit t = new CpTurnsFit(new android.content.Context(), c, null);
+        t.clock = 35000000L;
+        t.maneuver(nearManeuver(0, 14, 0, 0, 0, null, -1, "Fork Rd"));
+        t.routeGuidance(rgAt(1, 900));
+        check("1.8.0 fork far is unchanged: keep right at 900 m is 66 (got " + last("tbt ") + ")", last("tbt ").startsWith("tbt 66 "));
+    }
+
+    /**
      * 2.4.4 후보(베타 3, 공개 이슈 76번 2026-11-15 쏘렌토 MQ4 하이브리드·네이버 지도): 네이버 지도는 회전이 바뀌는 갱신에
      * item 10을 앞 회전의 남은 거리 그대로 넣는다. 그 값을 새 회전의 처음 거리로 잡으면 D가 바닥 30m가 되어 큰 그림이 약 1초 나간다.
      */
@@ -487,7 +523,7 @@ public final class CpTurnsTest {
         t.routeGuidance(rgAtIdx(1, 2000, 1));
         check("2.4.4 stale next (1): the real 2000 m next: far, no big picture at any point", farNow() && !anyNear());
         t.routeGuidance(rgAtIdx(1, 350, 1));
-        check("2.4.4 stale next (1): 350 m: near 25, bar 90 (D 350 m)", db(25, 90));
+        check("2.4.4 stale next (1): 350 m: near 13 (fork, 1.8.0), bar 90 (D 350 m)", db(13, 90));
         // ② 차 로그 11:39:30 유턴: 17m → 380m(막대 50 → 90으로 뛰던 줄)
         c = new Cluster();
         t = new CpTurnsFit(new android.content.Context(), c, null);
@@ -954,7 +990,7 @@ public final class CpTurnsTest {
         check("2.4.4 4th review M1: 21@15 put off", farNow() && "put-off".equals(t.nearWhy));
         t.clock += 300L;
         t.routeGuidance(rgAtIdx(1, 15, 21));
-        check("2.4.4 4th review M1: 21@15 again: taken (near 25, bar 50)", db(25, 50));
+        check("2.4.4 4th review M1: 21@15 again: taken (near 13 (fork, 1.8.0), bar 50)", db(13, 50));
         c.calls.clear();
         t.clock += 700L;
         t.routeGuidance(rgAtIdx(1, 2000, 21));
@@ -1291,14 +1327,14 @@ public final class CpTurnsTest {
         t = afterTurn0(18700000L, 13, 15);
         t.clock += 1000L;
         t.routeGuidance(rgAtIdx(1, 17, 1));
-        check("2.4.4 review M2 (a) known limit: old last 15 m, new first 17 m: taken (near, D 30 m)", db(25, 50));
+        check("2.4.4 review M2 (a) known limit: old last 15 m, new first 17 m: taken (near, D 30 m)", db(13, 50));
         // M2 (b) 알려진 한계: 앞 값이 두 번 이어 오면(15m 미룸 → 10m) 두 번째는 받아들인다(미루기는 회전마다 한 번)
         t = afterTurn0(18800000L, 13, 15);
         t.clock += 1000L;
         t.routeGuidance(rgAtIdx(1, 15, 1));
         t.clock += 1000L;
         t.routeGuidance(rgAtIdx(1, 10, 1));
-        check("2.4.4 review M2 (b) known limit: 15 m put off, then 10 m: taken (near, D 30 m, bar 30)", db(25, 30));
+        check("2.4.4 review M2 (b) known limit: 15 m put off, then 10 m: taken (near, D 30 m, bar 30)", db(13, 30));
         // M3 알려진 한계: 진짜로 붙은 회전(25m → 20m)은 멀리 있음 한 프레임, 그 뒤 item 10 없는 갱신만 오면 다음 item 10까지 멀리 있음
         t = afterTurn0(18900000L, 1, 25);
         c.calls.clear();
@@ -1477,9 +1513,9 @@ public final class CpTurnsTest {
         int[] r = CpTurnsFit.nearDisplay(2, 0, 0, 0, 67), l = CpTurnsFit.nearDisplay(1, 0, 0, -90, 70), u = CpTurnsFit.nearDisplay(4, 0, 0, 0, 72),
                 ul = CpTurnsFit.nearDisplay(4, 1, 0, 0, 73), xr = CpTurnsFit.nearDisplay(23, 0, 0, 0, 164), xl = CpTurnsFit.nearDisplay(22, 0, 0, 0, 165),
                 fk = CpTurnsFit.nearDisplay(13, 0, 0, 0, 71), rb = CpTurnsFit.nearDisplay(29, 0, 1, 90, 99), sr = CpTurnsFit.nearDisplay(48, 0, 0, 0, 68);
-        check("1.7.2 M-4 display: turn 13 (right 12, left 36), U-turn 31 (36; left-hand traffic 12), exit right 17 / left 18, keep left 25, roundabout its exit icon",
+        check("1.7.2 M-4 display: turn 13 (right 12, left 36), U-turn 31 (36; left-hand traffic 12), exit right 17 / left 18, keep left 13 at 337.5 (1.8.0), roundabout its exit icon",
                 arr(r).equals("[13, 4, 12]") && arr(l).equals("[13, 11, 36]") && arr(u).equals("[31, -1, 36]") && arr(ul).equals("[31, -1, 12]")
-                        && arr(xr).equals("[17, -1, 12]") && arr(xl).equals("[18, -1, 36]") && arr(fk).equals("[25, -1, 42]")
+                        && arr(xr).equals("[17, -1, 12]") && arr(xl).equals("[18, -1, 36]") && arr(fk).equals("[13, 14, 45]")
                         && arr(rb).equals("[99, 4, 12]") && arr(sr).equals("[13, 6, 18]"));
         check("1.7.2 M-4 display: destination, waypoint, departure, ferry, no turn: no near layout (far, bar invalid)",
                 CpTurnsFit.nearDisplay(12, 0, 0, 0, 112) == null && CpTurnsFit.nearDisplay(10, 0, 0, 0, 112) == null
@@ -1862,6 +1898,8 @@ public final class CpTurnsTest {
         hyst173();
         dynamicD();
         staleNext();
+        forkLikeStock();
+        unknownManeuverAsk();
         staleNextReview();
         kakaoOrder();
         kakaoOrderMore();
@@ -2050,6 +2088,127 @@ public final class CpTurnsTest {
         d.routeGuidance(msg(0, U16, i(1), 1, ENUM, i(1), 11, STR, s("0"), 12, ENUM, i(2), 13, U16, i(0)));
         st = last("tbt ");
         check("beta 2 (review 3): start with a U-turn (type 18) at 0: distance invalid too", st != null && st.contains(" 0.0 -3 "));
+    }
+
+    /** 2.4.7: unknownManeuverAsk의 다시 요청 횟수(restart가 따로 스레드에서 세므로 잠깐 기다려 읽는다) */
+    static int asksAfter(java.util.concurrent.atomic.AtomicInteger n, int want) throws InterruptedException {
+        for (int k = 0; k < 100 && n.get() < want; k++) Thread.sleep(10);
+        Thread.sleep(30);
+        return n.get();
+    }
+
+    static int unknownLines(String part) {
+        int n = 0;
+        for (String l : Dipo.logs) if (l.startsWith("CarPlay: maneuver ") && l.contains(part)) n++;
+        return n;
+    }
+
+    /**
+     * 2.4.7(#465·#450): 회전 번호(120)는 오는데 그 회전 내용(121)이 없으면 길안내를 다시 요청한다. 처음 본 뒤 3초, 같은 번호에 한 번,
+     * 요청 사이 30초, 연결 한 번에 3번, busy면 양보, 경로 끝은 번호만 잊고 끊김·앱 바뀜은 횟수까지 처음부터. 줄은 숫자만
+     */
+    static void unknownManeuverAsk() throws Exception {
+        Car.unit = Car.DISTANCE_KM;
+        c = new Cluster();
+        final java.util.concurrent.atomic.AtomicInteger asked = new java.util.concurrent.atomic.AtomicInteger();
+        CpTurnsFit t = new CpTurnsFit(new android.content.Context(), c, new Runnable() {
+            @Override
+            public void run() {
+                asked.incrementAndGet();
+            }
+        });
+        final boolean[] busy = { false };
+        t.busy = new CpTurnsFit.Busy() {
+            @Override
+            public boolean busy() {
+                return busy[0];
+            }
+        };
+        int logs0 = Dipo.logs.size();
+        long t0 = 41000000L;
+        t.clock = t0;
+        t.routeGuidance(rgAtIdx(1, 300, 5));
+        t.clock = t0 + 1000L;
+        t.routeGuidance(rgAtIdx(1, 290, 5));
+        check("2.4.7 unknown turn: not asked at first sight nor within 3 s (the phone's 121 can come after its 120)", asksAfter(asked, 1) == 0);
+        t.clock = t0 + 3500L;
+        t.routeGuidance(rgAtIdx(1, 280, 5));
+        check("2.4.7 unknown turn: still unknown after 3 s: route guidance asked again once", asksAfter(asked, 1) == 1);
+        check("2.4.7 unknown turn: one line, numbers only (maneuver 5, 3 s, 1/3)",
+                unknownLines("maneuver 5 unknown for 3 s, route guidance asked again (1/3)") == 1);
+        t.clock = t0 + 40000L;
+        t.routeGuidance(rgAtIdx(1, 270, 5));
+        check("2.4.7 unknown turn: the same number is asked about only once", asksAfter(asked, 2) == 1);
+        // 폰이 회전 내용을 다시 보냄: 보인다
+        t.maneuver(nearManeuver(5, 2, 0, 0, 90, null, -1, "Road U"));
+        t.clock = t0 + 41000L;
+        t.routeGuidance(rgAtIdx(1, 260, 5));
+        check("2.4.7 unknown turn: once the phone resends the maneuver, it's shown (near 13)", last("tbt ") != null && last("tbt ").startsWith("tbt 13 "));
+        check("2.4.7 unknown turn: a known turn forgets the unknown number", t.unknownIdx == -1);
+        // 다른 번호: 30초 간격 안이면 기다림(첫 요청 3.5초 뒤 + 30초 = 33.5초 뒤까지는 이미 지났으므로 여기서는 시각을 앞으로 둔다)
+        t.clock = t0 + 50000L;
+        t.routeGuidance(rgAtIdx(1, 300, 6));
+        t.clock = t0 + 54000L;
+        busy[0] = true;
+        t.routeGuidance(rgAtIdx(1, 290, 6));
+        check("2.4.7 unknown turn: another ask is in progress (RgAsk waiting or a restart just now): this one yields", asksAfter(asked, 2) == 1);
+        busy[0] = false;
+        t.clock = t0 + 55000L;
+        t.routeGuidance(rgAtIdx(1, 280, 6));
+        check("2.4.7 unknown turn: not busy any more: asked (2/3)", asksAfter(asked, 2) == 2 && unknownLines("(2/3)") == 1);
+        t.clock = t0 + 60000L;
+        t.routeGuidance(rgAtIdx(1, 300, 7));
+        t.clock = t0 + 64000L;
+        t.routeGuidance(rgAtIdx(1, 290, 7));
+        check("2.4.7 unknown turn: less than 30 s since the last ask: waits", asksAfter(asked, 3) == 2);
+        t.clock = t0 + 86000L;
+        t.routeGuidance(rgAtIdx(1, 280, 7));
+        check("2.4.7 unknown turn: 30 s after the last ask: asked (3/3)", asksAfter(asked, 3) == 3);
+        // 경로 끝(stop): 번호는 잊지만 횟수는 연결 단위로 남는다
+        t.routeGuidance(rgAtIdx(0, 0, 7));
+        t.clock = t0 + 130000L;
+        t.routeGuidance(rgAtIdx(1, 300, 8));
+        t.clock = t0 + 134000L;
+        t.routeGuidance(rgAtIdx(1, 290, 8));
+        t.clock = t0 + 170000L;
+        t.routeGuidance(rgAtIdx(1, 280, 8));
+        check("2.4.7 unknown turn: 3 asks in this connection: no 4th, even on a new route", asksAfter(asked, 4) == 3);
+        check("2.4.7 unknown turn: the limit is logged once (numbers only)", unknownLines("still unknown after 3 asks") == 1);
+        t.clock = t0 + 210000L;
+        t.routeGuidance(rgAtIdx(1, 270, 8));
+        check("2.4.7 unknown turn: the limit line isn't repeated", unknownLines("still unknown after 3 asks") == 1);
+        // 연결 끝: 처음부터
+        t.disconnected();
+        t.clock = t0 + 300000L;
+        t.routeGuidance(rgAtIdx(1, 300, 9));
+        t.clock = t0 + 304000L;
+        t.routeGuidance(rgAtIdx(1, 290, 9));
+        check("2.4.7 unknown turn: after a disconnect the count starts over (1/3)", asksAfter(asked, 4) == 4);
+        // 길 찾는 중·안내 없음은 묻지 않는다
+        CpTurnsFit q = new CpTurnsFit(new android.content.Context(), new Cluster(), new Runnable() {
+            @Override
+            public void run() {
+                asked.incrementAndGet();
+            }
+        });
+        q.clock = t0;
+        q.routeGuidance(rgAtIdx(0, 300, 3));
+        q.clock = t0 + 5000L;
+        q.routeGuidance(rgAtIdx(0, 300, 3));
+        check("2.4.7 unknown turn: not guiding (state 0): never asks", asksAfter(asked, 5) == 4);
+        // restart가 없으면(시험·설정) 아무 일도 없다
+        CpTurnsFit z = new CpTurnsFit(new android.content.Context(), new Cluster(), null);
+        z.clock = t0;
+        z.routeGuidance(rgAtIdx(1, 300, 3));
+        z.clock = t0 + 5000L;
+        z.routeGuidance(rgAtIdx(1, 300, 3));
+        check("2.4.7 unknown turn: no restart: nothing asked, no line", z.unknownAsks == 0);
+        boolean plain = true;
+        for (int k = logs0; k < Dipo.logs.size(); k++) {
+            String l = Dipo.logs.get(k);
+            if (l.startsWith("CarPlay: maneuver ") && (l.contains(" unknown") || l.contains("asked again")) && !l.matches("[A-Za-z0-9 :,()/.]*")) plain = false;
+        }
+        check("2.4.7 unknown turn: its lines are plain words and numbers (no road or app names)", plain);
     }
 
 }

@@ -77,6 +77,14 @@
       "apply": "restart",
       "title": "Star key: skip the stock phone projection hint popup",
       "description": "Korean build. A hook in the phone projection app (no files changed): the star key set to the phone projection shortcut no longer opens the stock 'how to connect' popup while no phone is registered in the stock wireless list. It could cover the CarPlay screen and freeze the screen and keys. With a registered phone the stock device list popup stays. Off: stock."
+    },
+    {
+      "key": "cp_firewall",
+      "type": "toggle",
+      "default": true,
+      "apply": "rebuild",
+      "title": "Allow wireless CarPlay through the hotspot firewall",
+      "description": "Korean build: on by default. Some cars' stock firewalls (seen on the Casper Electric AX1EV 260902) open CarPlay's ports only on the wired link, so the iPhone joins the Wi-Fi and then drops. Accepts CarPlay's ports from the hotspot's own addresses only (IPv4 192.168.0.0/24, IPv6 link-local), TCP and UDP, as destination or source: 5000-5001, 5020, 5353, 6000-6003, 6011, 6020, 6030, 7000 (and 6031 on IPv6), plus ICMPv6. HMG-API manages the rules and removes them when this setting or the mod is off."
     }
   ]
 }

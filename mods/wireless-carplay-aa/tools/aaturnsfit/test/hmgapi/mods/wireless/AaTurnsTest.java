@@ -146,6 +146,7 @@ public final class AaTurnsTest {
         sameKindD();
         staleNextAa();
         stockSideBitsAa();
+        forkLikeStockAa();
         marginD();
         layerChoice();
         System.exit(fail);
@@ -267,18 +268,18 @@ public final class AaTurnsTest {
         t.clock += 2000L;
         t.nextTurn("Fork Rd", RIGHT, FORK, -1, 0);
         t.nextTurnDistance(300, 20, 300, METERS);
-        check("1.7.3 A-2: the fork at 300 m: near fork 25", last("tbt ").startsWith("tbt 25 ") && "road [Fork Rd]".equals(last("road ")));
+        check("1.7.3 A-2: the fork at 300 m: near fork 13 (1.8.0)", last("tbt ").startsWith("tbt 13 ") && "road [Fork Rd]".equals(last("road ")));
         c.calls.clear();
         t.clock += 2000L;
         t.nextTurn("Name Rd", UNSPEC, NAME, -1, 0);
         check("A-2 rule: the name change alone sends nothing (decided at the next distance)", c.calls.isEmpty() && t.namePend);
         t.nextTurnDistance(300, 20, 300, METERS);
-        check("1.7.3 A-2: name change inside D, next distance the same (300 m): still the near fork (25), only the road name changes",
-                "25".equals(icons()) && "road [Name Rd]".equals(last("road ")) && last("tbt ").startsWith("tbt 25 "));
+        check("1.7.3 A-2: name change inside D, next distance the same (300 m): still the near fork (13, 1.8.0), only the road name changes",
+                "13".equals(icons()) && "road [Name Rd]".equals(last("road ")) && last("tbt ").startsWith("tbt 13 "));
         t.clock += 2000L;
         t.nextTurnDistance(280, 18, 280, METERS);
-        check("1.7.3 A-2: its distance (280 m, same stretch): still the fork, near (25), the name change's road",
-                "25".equals(icons()) && last("tbt ").startsWith("tbt 25 ") && "road [Name Rd]".equals(last("road ")));
+        check("1.7.3 A-2: its distance (280 m, same stretch): still the fork, near (13), the name change's road",
+                "13".equals(icons()) && last("tbt ").startsWith("tbt 13 ") && "road [Name Rd]".equals(last("road ")));
         c.calls.clear();
         // 갈림길을 지남: 남은 거리가 크게 늘면(30m -> 1500m) 붙잡아 둔 이름 바뀜이 다음 회전이 된다(65)
         t.clock += 2000L;
@@ -584,7 +585,7 @@ public final class AaTurnsTest {
         t.status(1);
         t.nextTurn("Fork A", RIGHT, FORK, -1, 0);
         t.nextTurnDistance(300, 20, 300, METERS);
-        check("stage 6 L1: fork A at 300 m: near fork (25)", last("tbt ").startsWith("tbt 25 "));
+        check("stage 6 L1: fork A at 300 m: near fork (13, 1.8.0)", last("tbt ").startsWith("tbt 13 "));
         c.calls.clear();
         t.clock += 500L;
         t.nextTurn("Fork B", RIGHT, FORK, -1, 0);
@@ -595,7 +596,7 @@ public final class AaTurnsTest {
         t.clock += 100L;
         t.nextTurnDistance(900, 50, 900, METERS);
         check("stage 6 L1: fork B's own distance (900 m): far fork (173), never the near picture in between",
-                last("tbt ").startsWith("tbt 173 ") && !c.calls.toString().contains("tbt 25 "));
+                last("tbt ").startsWith("tbt 173 ") && !c.calls.toString().contains("tbt 13 "));
         t.status(2);
         // L2: 이름만 다른 같은 방향 다음 회전 뒤 거리가 안 오면 1초 뒤 한 번 멀리 있음(2.4.0 동작), 반복 없음
         c = new Cluster();
@@ -804,19 +805,19 @@ public final class AaTurnsTest {
         row("passed a turn, then stopped (no distance for 60 s)", x, AaTurnsFit.PEND_WAIT_MS, 1, x.sent(65));
         // 6b. 붙잡은 뒤 정차(실제 회전 이벤트도 거리도 안 옴): 붙잡기 한도(8초)에서 풀림
         x = new Sc(true);
-        x.ev("Fork", R, FORK).dist(300).after(1000).ev("Name", U, NAME).after(500).dist(300).pass(25, 173).mark();
+        x.ev("Fork", R, FORK).dist(300).after(1000).ev("Name", U, NAME).after(500).dist(300).pass(13, 173).mark();
         x.after(60000);
         row("held, then stopped (nothing for 60 s): the 8 s hold limit", x, AaTurnsFit.NAME_HOLD_MS, 1, x.sent(65) && !x.t.nameHeld);
         // 7. 같은 방향 연속 갈림길, 거리 먼저: B의 번갈아도 막힘
         x = new Sc(true);
-        x.ev("Fork A", R, FORK).dist(300).after(1000).dist(10).after(500).pass(25).mark();
+        x.ev("Fork A", R, FORK).dist(300).after(1000).dist(10).after(500).pass(13).mark();
         x.ev("Fork B", R, FORK).after(100).dist(900);
         m = 900;
         for (int k = 0; k < 6; k++) x.after(1500).ev(k % 2 == 0 ? "Name" : "Fork B", k % 2 == 0 ? U : R, k % 2 == 0 ? NAME : FORK).after(500).dist(m -= 30);
         row("consecutive same-side forks, B's distance first, then B alternates", x, 100, 1, !x.sent(65));
         // 8. 같은 방향 연속 갈림길, 이름 먼저(B 이벤트 → 이름 바뀜 → B의 거리)
         x = new Sc(true);
-        x.ev("Fork A", R, FORK).dist(300).after(1000).pass(25).mark();
+        x.ev("Fork A", R, FORK).dist(300).after(1000).pass(13).mark();
         x.ev("Fork B", R, FORK).after(300).ev("Name", U, NAME).after(300).dist(900).after(1000).dist(870).after(1000).dist(840);
         row("consecutive same-side forks, the name change before B's distance", x, 600, 1, !x.sent(65));
         // 9. 같은 회전의 이름만 A↔B 2초마다, 거리가 옴(300m)
@@ -843,9 +844,9 @@ public final class AaTurnsTest {
         row("next same-side turn with another name after 15 m, no distance", x, AaTurnsFit.PEND_WAIT_MS, 1, !x.t.samePend);
         // 13. 재탐색 시작·끝(판단을 기다리는 중)
         x = new Sc(true);
-        x.ev("Fork", R, FORK).dist(300).after(500).ev("Name", U, NAME).after(300).pass(25).mark();
+        x.ev("Fork", R, FORK).dist(300).after(500).ev("Name", U, NAME).after(300).pass(13).mark();
         x.st(3).after(3000).st(1).after(3000);
-        row("rerouting starts and ends while a name change waits", x, 300, 2, !x.sent(25) && x.h.pending.isEmpty());
+        row("rerouting starts and ends while a name change waits", x, 300, 2, !x.sent(13) && x.h.pending.isEmpty());
         // 13b. 재탐색 중에 이름만 다른 같은 꼴 이벤트(판단 기다림)가 생긴 채 재탐색이 끝남: 옛 거리로 바로 보내지 않음(L1)
         x = new Sc(true);
         x.ev("Road A", R, TURN).dist(300).after(10).st(3).ev("Road A", R, TURN).dist(320).ev("Road B", R, TURN).after(10).mark();
@@ -1033,7 +1034,7 @@ public final class AaTurnsTest {
                 !old && !x.h.pending.contains(x.t.rerouteDue));
         // 14. 안내 끝(판단을 기다리는 중)
         x = new Sc(true);
-        x.ev("Fork", R, FORK).dist(300).after(500).ev("Name", U, NAME).after(300).pass(25).mark();
+        x.ev("Fork", R, FORK).dist(300).after(500).ev("Name", U, NAME).after(300).pass(13).mark();
         x.st(2).after(5000);
         row("guidance ends while a name change waits", x, 0, 1, x.h.pending.isEmpty() && x.frames.get(x.frames.size() - 1)[1] == 8);
         // 15. end() 단독: 안내 시작 전 기한이 걸린 채(이름만 다른 같은 꼴 이벤트)
@@ -1112,6 +1113,26 @@ public final class AaTurnsTest {
     static boolean anyNear() {
         for (String x : c.calls) if (x.startsWith("tbt ") && Integer.parseInt(x.split(" ")[9]) == 0) return true;
         return false;
+    }
+
+    /** 1.8.0: AA 갈림(FORK)의 곧 회전도 순정처럼 13 + 비스듬한 방향 + 다른 길 비트(2.4.7: 오른쪽 직진 비트 0, 왼쪽 22.5도 비트 1, 니로 순정 운행 2026-11-17·11-20) */
+    static void forkLikeStockAa() {
+        final int RIGHT = 2, LEFT = 1, FORK = 9, METERS = 1;
+        int[] sides = { RIGHT, LEFT };
+        String[] want = { "tbt 13 3 22.5 ", "tbt 13 16386 337.5 " };   // 거리는 앞 시험의 단위 설정을 따라 보지 않는다
+        for (int k = 0; k < 2; k++) {
+            c = new Cluster();
+            Handler h = new Handler();
+            AaTurnsFit t = new AaTurnsFit(new android.content.Context(), c, h);
+            t.clock = 91000000L + k * 1000000L;
+            t.status(1);
+            t.nextTurn("Fork Rd", sides[k], FORK, -1, 0);
+            t.nextTurnDistance(300, 20, 300, METERS);
+            String l = last("tbt ");
+            check("1.8.0 AA fork near like stock (" + (k == 0 ? "right" : "left") + "): " + want[k].trim() + " (got " + l + ")",
+                    l != null && l.startsWith(want[k]) && !c.calls.toString().contains("tbt 25 "));
+            t.status(2);
+        }
     }
 
     /** 2.4.4 후보(나): AA 큰 그림의 옆길 비트를 순정 값에 맞춘다(왼쪽 절반 비트 8~14, 방향 칸은 그대로) */
@@ -1358,7 +1379,7 @@ public final class AaTurnsTest {
         t.nextTurn("Name Rd", 3, NAME, -1, 0);
         t.clock += 300L;
         t.nextTurnDistance(290, 29, 290, METERS);
-        check("2.4.3 A-2 kept: fork then a name change for the same point: fork near 25 held, D 300 m (bar 90)", db(25, 90));
+        check("2.4.3 A-2 kept: fork then a name change for the same point: fork near 13 held, D 300 m (bar 90)", db(13, 90));
         Car.unit = Car.DISTANCE_MILES;
     }
 
@@ -1421,7 +1442,7 @@ public final class AaTurnsTest {
     static void near172() {
         final int RIGHT = 2, LEFT = 1, TURN = 4, SLIGHT = 3, SHARP = 5, U_TURN = 6, OFF_RAMP = 8, FORK = 9, NAME = 2, DEPART = 1, DEST = 19,
                 RB_EXIT = 13, RB_EXIT_ONLY = 12, METERS = 1;
-        check("1.7.2 M-12 display: turns 13 (slight/turn/sharp right 6/12/18, left 42/36/30), U-turn 31 (36), exits 17/18, fork 25",
+        check("1.7.2 M-12 display: turns 13 (slight/turn/sharp right 6/12/18, left 42/36/30), U-turn 31 (36), exits 17/18, fork 13 (1.8.0)",
                 java.util.Arrays.toString(AaTurnsFit.nearDisplay(TURN, RIGHT, 67, 90)).equals("[13, 4, 12]")
                         && java.util.Arrays.toString(AaTurnsFit.nearDisplay(TURN, LEFT, 70, 270)).equals("[13, 11, 36]")
                         && java.util.Arrays.toString(AaTurnsFit.nearDisplay(SLIGHT, RIGHT, 66, 30)).equals("[13, 2, 6]")
@@ -1429,7 +1450,7 @@ public final class AaTurnsTest {
                         && java.util.Arrays.toString(AaTurnsFit.nearDisplay(U_TURN, LEFT, 72, 270)).equals("[31, -1, 36]")
                         && java.util.Arrays.toString(AaTurnsFit.nearDisplay(OFF_RAMP, RIGHT, 164, 30)).equals("[17, -1, 12]")
                         && java.util.Arrays.toString(AaTurnsFit.nearDisplay(OFF_RAMP, LEFT, 165, 330)).equals("[18, -1, 36]")
-                        && java.util.Arrays.toString(AaTurnsFit.nearDisplay(FORK, RIGHT, 173, 0)).equals("[25, -1, 6]")
+                        && java.util.Arrays.toString(AaTurnsFit.nearDisplay(FORK, RIGHT, 173, 0)).equals("[13, 1, 3]")
                         && java.util.Arrays.toString(AaTurnsFit.nearDisplay(RB_EXIT, 0, 99, 90)).equals("[99, 4, 12]")
                         && java.util.Arrays.toString(AaTurnsFit.nearDisplay(RB_EXIT, 0, 102, 180)).equals("[102, 8, 27]"));
         check("1.7.2 M-12 display: unknown side, name change, departure, destination, unknown roundabout: no near layout",
@@ -1683,8 +1704,8 @@ public final class AaTurnsTest {
                 "stock navigation: road name length 1".equals(on.line("update_tp_crossroad_name", new Object[] { "x" }, false))
                         && on.line("update_tp_destination_name", new Object[] { "x" }, false) == null);
         int n = 1;   // 회전 줄은 위에서 1줄
-        for (int k = 0; k < 500; k++) if (on.line("update_tbt_info", new Object[] { k, 0, 0f, 0f, 0, 0, 0, 0, 0 }, false) != null) n++;
-        check("2.3.0 stock observation: at most 300 lines (review: turn lines have their own 100)", n == 100 && on.lines == 103
+        for (int k = 0; k < 600; k++) if (on.line("update_tbt_info", new Object[] { k, 0, 0f, 0f, 0, 0, 0, 0, 0 }, false) != null) n++;
+        check("2.3.0 stock observation: turn lines have their own cap (1.8.0: 400, about 2 hours)", n == 400 && on.lines == 403
                 && on.line("update_lane_info", new Object[] { new byte[] { (byte) 0xf1, 3 } }, false) != null);
         stockLog172();
     }
@@ -1788,7 +1809,7 @@ public final class AaTurnsTest {
                 on.line("update_tp_crossroad_name", new Object[] { new Object() }, false) == null);
         int sum = 0;
         for (int m : StockLog.KIND_MAX) sum += m;
-        check("review 4: per-kind caps add up to the old 300", sum == StockLog.MAX && StockLog.KINDS.length == StockLog.KIND_MAX.length);
+        check("review 4 (1.8.0): per-kind caps add up to MAX 1000 (about 2 hours of driving)", sum == StockLog.MAX && StockLog.MAX == 1000 && StockLog.KINDS.length == StockLog.KIND_MAX.length);
 
         // 리뷰 4: 거리만 바뀐 2C·remain dis는 남기지 않고, 다른 값이 바뀔 때 그때 거리를 함께 남긴다
         StockLog d = new StockLog(true);
@@ -1813,12 +1834,12 @@ public final class AaTurnsTest {
         for (int k = 0; k < 400; k++) if (f.line(StockLog.CLU_DATA_14, new Object[] { k, 1, 1, 1, 1 }, false) != null) kc++;
         int kr = 0;
         for (int k = 0; k < 400; k++) if (f.line("update_remain_dis", new Object[] { 1, k, 0, 0 }, false) != null) kr++;
-        check("review 4: 2C stops at 30, CluDataNew_14 at 20, remain dis at 25", k2 == 30 && kc == 20 && kr == 25);
+        check("review 4 (1.8.0): 2C stops at 80, CluDataNew_14 at 60, remain dis at 80", k2 == 80 && kc == 60 && kr == 80);
         check("review 4: a turn line still goes out after the others filled up",
                 f.line("update_tbt_info", new Object[] { 13, 0, 90f, 300f, 0, 0, 0, 90, 0 }, false) != null);
         int kt = 1;
-        for (int k = 0; k < 400; k++) if (f.line("update_tbt_info", new Object[] { k, 0, 0f, 0f, 0, 0, 0, 0, 0 }, false) != null) kt++;
-        check("review 4: turn lines stop at 100", kt == 100);
+        for (int k = 0; k < 600; k++) if (f.line("update_tbt_info", new Object[] { k, 0, 0f, 0f, 0, 0, 0, 0, 0 }, false) != null) kt++;
+        check("review 4 (1.8.0): turn lines stop at 400", kt == 400);
 
         // 2차 리뷰 반영: updateTBTSubInfo 무안내 값 관찰(거리만 바뀐 줄은 남기지 않음)
         StockLog sb = new StockLog(true);

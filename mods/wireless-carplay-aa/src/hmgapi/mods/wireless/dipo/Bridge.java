@@ -324,6 +324,7 @@ final class Bridge {
             sCpClient = false;
             sCpConnected = false;
             NOW_PLAYING.reset();
+            Dipo.cpChannelGone();
             synchronized (sPendingIn) {
                 sPendingIn.clear();
             }
@@ -346,6 +347,8 @@ final class Bridge {
         boolean drop = sCpClient && (what == NOTI_IDENTIFICATION_ACCEPTED || what == NOTI_TRANSPORT_IDENTIFIER);
         if (drop) log("DiPO: dropping iAP2 noti " + what + " from the CarPlay-channel session");
         if (drop && NOW_PLAYING.due(Dipo.nowPlaying, sCpClient, what)) startNowPlaying(NOW_PLAYING.session(), 1);
+        // 1.8.0(모드 2.4.7): 채널 세션의 식별이 수락됐다. 블루투스 세션에서 받던 길안내 구독을 다시 요청한다(RgAsk)
+        if (drop && what == NOTI_IDENTIFICATION_ACCEPTED) Dipo.cpChannelReady();
         return drop;
     }
 
@@ -521,9 +524,20 @@ final class Bridge {
         }
     }
 
+    /**
+     * Korea Projection 1.8.0(모드 2.4.8, 패키지 ① 세션): USB Wi-Fi 동글을 쓰는 부팅이면 패키지가 서비스 시작 때(부팅 +4초)
+     * 이 속성을 1로 둔다(재부팅하면 사라짐). 그 부팅은 순정 Wi-Fi를 아예 쓰지 않는다: 순정 AP를 켜면 순정 HAL이 bcmdhd를 올려
+     * 동글과 wlan0을 다투기 때문이다(니로 네 번째 시험판 원인, dongle.md 4-25). 동글 AP는 패키지가 띄운다.
+     */
+    static final String DONGLE_PROP = "sys.kp.dongle";
+
     /** the head unit's hotspot in mode 2 (for connectivity), which wireless CarPlay joins */
     static void ensureHotspot(Context c) {
         try {
+            if ("1".equals(prop(DONGLE_PROP, ""))) {
+                log("dongle boot (" + DONGLE_PROP + "=1), stock AP-on skipped [mod 2.4.8]");
+                return;
+            }
             Object wifi = c.getSystemService(Context.WIFI_SERVICE);
             if (wifi == null) return;
             Class<?> k = wifi.getClass();
@@ -629,6 +643,7 @@ final class Bridge {
             } else if (component == COMPONENT_CARPLAY_CLIENT) {
                 sCpConnected = false;
                 NOW_PLAYING.reset();
+                Dipo.cpChannelGone();
             }
         }
 

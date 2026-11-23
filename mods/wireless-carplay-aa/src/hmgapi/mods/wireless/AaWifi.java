@@ -41,6 +41,8 @@ final class AaWifi {
 
     static final String PHONEPROJ = "com.daudio.app.phoneprojection";
     static final String PROP = "sys.kp.aa_ap";
+    /** 모드 2.4.8(패키지 ① 세션): 동글 부팅 속성(Bridge.DONGLE_PROP과 같은 이름). 1이면 순정 AP 켜기도 막는다 */
+    static final String DONGLE_PROP = "sys.kp.dongle";
     /** 한 프로세스에 한 번만 건다(같은 프로세스에 앱이 여럿 올라와도) */
     private static boolean hooked;
     private static Method getProp;
@@ -52,6 +54,17 @@ final class AaWifi {
         try {
             if (getProp == null) getProp = Class.forName("android.os.SystemProperties").getMethod("get", String.class, String.class);
             return "1".equals(getProp.invoke(null, PROP, "0"));
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /** 동글 부팅인가(sys.kp.dongle=1). 순정 AP 켜기·설정만 막는 데 쓴다(isWifiApEnabled 흉내는 하지 않음) */
+    static boolean dongle(ModContext mod) {
+        if (!mod.enabled()) return false;
+        try {
+            if (getProp == null) getProp = Class.forName("android.os.SystemProperties").getMethod("get", String.class, String.class);
+            return "1".equals(getProp.invoke(null, DONGLE_PROP, "0"));
         } catch (Throwable t) {
             return false;
         }
@@ -97,11 +110,13 @@ final class AaWifi {
             MethodHook h = new MethodHook() {
                 @Override
                 protected void beforeHookedMethod(Param p) {
-                    if (!on(mod)) return;
+                    final boolean ours = on(mod);
+                    if (!ours && !dongle(mod)) return;
                     p.setResult(Boolean.TRUE);
                     if (blockLogs < 5) {
                         blockLogs++;
-                        mod.log("Android Auto AP: " + name + (p.args.length > 1 ? "(" + p.args[1] + ")" : "") + " skipped, the package runs the AP");
+                        mod.log("Android Auto AP: " + name + (p.args.length > 1 ? "(" + p.args[1] + ")" : "") + " skipped, "
+                                + (ours ? "the package runs the AP" : "dongle boot (" + DONGLE_PROP + "=1) [mod 2.4.8]"));
                     }
                 }
             };

@@ -540,8 +540,8 @@ public final class AaTurnsTest {
                 "stock navigation: road name length 1".equals(on.line("update_tp_crossroad_name", new Object[] { "x" }, false))
                         && on.line("update_tp_destination_name", new Object[] { "x" }, false) == null);
         int n = 1;   // 회전 줄은 위에서 1줄
-        for (int k = 0; k < 500; k++) if (on.line("update_tbt_info", new Object[] { k, 0, 0f, 0f, 0, 0, 0, 0, 0 }, false) != null) n++;
-        check("2.3.0 stock observation: at most 300 lines (review: turn lines have their own 100)", n == 100 && on.lines == 103
+        for (int k = 0; k < 600; k++) if (on.line("update_tbt_info", new Object[] { k, 0, 0f, 0f, 0, 0, 0, 0, 0 }, false) != null) n++;
+        check("2.3.0 stock observation: turn lines have their own cap (1.8.0: 400, about 2 hours)", n == 400 && on.lines == 403
                 && on.line("update_lane_info", new Object[] { new byte[] { (byte) 0xf1, 3 } }, false) != null);
         stockLog172();
     }
@@ -644,7 +644,7 @@ public final class AaTurnsTest {
                 on.line("update_tp_crossroad_name", new Object[] { new Object() }, false) == null);
         int sum = 0;
         for (int m : StockLog.KIND_MAX) sum += m;
-        check("review 4: per-kind caps add up to the old 300", sum == StockLog.MAX && StockLog.KINDS.length == StockLog.KIND_MAX.length);
+        check("review 4 (1.8.0): per-kind caps add up to MAX 1000 (about 2 hours of driving)", sum == StockLog.MAX && StockLog.MAX == 1000 && StockLog.KINDS.length == StockLog.KIND_MAX.length);
 
         // 리뷰 4: 거리만 바뀐 2C·remain dis는 남기지 않고, 다른 값이 바뀔 때 그때 거리를 함께 남긴다
         StockLog d = new StockLog(true);
@@ -669,12 +669,12 @@ public final class AaTurnsTest {
         for (int k = 0; k < 400; k++) if (f.line(StockLog.CLU_DATA_14, new Object[] { k, 1, 1, 1, 1 }, false) != null) kc++;
         int kr = 0;
         for (int k = 0; k < 400; k++) if (f.line("update_remain_dis", new Object[] { 1, k, 0, 0 }, false) != null) kr++;
-        check("review 4: 2C stops at 30, CluDataNew_14 at 20, remain dis at 25", k2 == 30 && kc == 20 && kr == 25);
+        check("review 4 (1.8.0): 2C stops at 80, CluDataNew_14 at 60, remain dis at 80", k2 == 80 && kc == 60 && kr == 80);
         check("review 4: a turn line still goes out after the others filled up",
                 f.line("update_tbt_info", new Object[] { 13, 0, 90f, 300f, 0, 0, 0, 90, 0 }, false) != null);
         int kt = 1;
-        for (int k = 0; k < 400; k++) if (f.line("update_tbt_info", new Object[] { k, 0, 0f, 0f, 0, 0, 0, 0, 0 }, false) != null) kt++;
-        check("review 4: turn lines stop at 100", kt == 100);
+        for (int k = 0; k < 600; k++) if (f.line("update_tbt_info", new Object[] { k, 0, 0f, 0f, 0, 0, 0, 0, 0 }, false) != null) kt++;
+        check("review 4 (1.8.0): turn lines stop at 400", kt == 400);
 
         // 2차 리뷰 반영: updateTBTSubInfo 무안내 값 관찰(거리만 바뀐 줄은 남기지 않음)
         StockLog sb = new StockLog(true);

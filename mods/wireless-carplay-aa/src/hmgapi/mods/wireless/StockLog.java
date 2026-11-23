@@ -5,7 +5,7 @@ package hmgapi.mods.wireless;
 //   - HUD 목록 updateTPTurnListNew: 앞 5바이트(F2, 수, 아이콘 3칸) 16진과 전체 길이. 이름 바이트는 길이만
 //   - updateRemainDis, updateCluDataNew_14 값, 도로 이벤트(updateRoadEventInfo) 프레임 16진
 //   - 교차로(도로) 이름은 글자 수만
-//   - (리뷰 반영) 줄 한도 300을 종류별로 나눴다. 2C·remain dis는 거리 칸을 빼고 비교한다
+//   - (리뷰 반영) 줄 한도(당시 300, 1.8.0에서 1000)를 종류별로 나눴다. 2C·remain dis는 거리 칸을 빼고 비교한다
 //   - (2차 리뷰 반영) updateTBTSubInfo(9·10인자) 값도 남긴다: 안내 끝 지우기 값을 순정 무안내 값에 맞추려고
 
 /**
@@ -23,13 +23,18 @@ package hmgapi.mods.wireless;
 final class StockLog {
     /** Korea Projection's debug flag (svc/hotspot.sh); root-only, so read in the zygote */
     static final String DEBUG_FILE = "/data/local/tmp/korea.projection/debug";
-    static final int MAX = 300;
+    /** 1.8.0(소유자 결정 2026-11-17): 2시간 운행분. 전에는 300줄이라 시내 운행 약 38분에 회전 줄이 다 찼다 */
+    static final int MAX = 1000;
     /**
      * 종류별 줄 한도(합계 MAX). 거리처럼 자주 바뀌는 종류가 한도를 다 써서 회전 줄(차-7의 D·근거리 값)을
      * 잃지 않게 나눴다(리뷰 4).
+     * 1.8.0: 니로 순정 운행(2026-11-17, 시내·올림픽대로 60분)의 시간당 줄 수에 2시간과 여유를 곱했다.
+     * 실측: tbt 약 150줄/시간(곧 회전 하나에 막대마다 약 9줄), lanes 약 50, hud list 약 43, 2c 약 28, remain dis 약 23,
+     * clu14 약 18, road name length 약 21, sub info는 안내 시작 때만, road event 0. 한도는 부팅 뒤 내비 프로세스 하나에
+     * 대한 것이라, 같은 부팅에서 앞서 달린 만큼 줄어든다. 줄은 숫자뿐이고 logcat에만 쓴다(2시간에 1000줄 = 약 100KB)
      */
     static final String[] KINDS = { "tbt", "hud list", "lanes", "2c", "remain dis", "clu14", "road event", "road name length", "sub info" };
-    static final int[] KIND_MAX = { 100, 40, 30, 30, 25, 20, 20, 15, 20 };
+    static final int[] KIND_MAX = { 400, 120, 120, 80, 80, 60, 40, 60, 40 };
     final int[] kindLines = new int[KINDS.length];
     /** 훅 지점이 아니라 Wireless가 직접 거는 관찰 전용 메서드의 이름표(지도에 없는 메서드라 HookPlan과 무관) */
     static final String CLU_DATA_14 = "update_clu_data_new_14", ROAD_EVENT = "update_road_event_info";
