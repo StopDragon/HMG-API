@@ -1,7 +1,7 @@
 {
   "id": "wireless-carplay-aa",
   "name": "Korea Projection: Wireless CarPlay + Android Auto",
-  "version": "2.4.8",
+  "version": "2.4.9",
   "hmgapi": ">=1.0.0",
   "authors": [
     "VysseCodes"
@@ -193,6 +193,18 @@
         "proto": "icmpv6",
         "action": "accept",
         "when": "settings.cp_firewall"
+      },
+      {
+        "chain": "input",
+        "in": "hotspot",
+        "to": "hotspot",
+        "ip": 4,
+        "proto": "tcp",
+        "ports": [
+          40515
+        ],
+        "action": "accept",
+        "when": "settings.aa_firewall"
       }
     ]
   }

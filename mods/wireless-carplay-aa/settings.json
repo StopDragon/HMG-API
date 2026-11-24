@@ -85,6 +85,14 @@
       "apply": "rebuild",
       "title": "Allow wireless CarPlay through the hotspot firewall",
       "description": "Korean build: on by default. Some cars' stock firewalls (seen on the Casper Electric AX1EV 260902) open CarPlay's ports only on the wired link, so the iPhone joins the Wi-Fi and then drops. Accepts CarPlay's ports from the hotspot's own addresses only (IPv4 192.168.0.0/24, IPv6 link-local), TCP and UDP, as destination or source: 5000-5001, 5020, 5353, 6000-6003, 6011, 6020, 6030, 7000 (and 6031 on IPv6), plus ICMPv6. HMG-API manages the rules and removes them when this setting or the mod is off."
+    },
+    {
+      "key": "aa_firewall",
+      "type": "toggle",
+      "default": true,
+      "apply": "rebuild",
+      "title": "Allow wireless Android Auto through the hotspot firewall",
+      "description": "Korean build: on by default. Cars with the stock whitelist firewall (seen on the Casper Electric AX1EV 260902) drop the phone's TCP connection to the head unit's Android Auto port, so the phone joins the Wi-Fi and then leaves. Accepts TCP to port 40515 (the port the stock receiver sends the phone) from and to the hotspot's own IPv4 addresses only (192.168.0.0/24). HMG-API manages the rule and removes it when this setting or the mod is off. Cars without that firewall are not affected."
     }
   ]
 }
