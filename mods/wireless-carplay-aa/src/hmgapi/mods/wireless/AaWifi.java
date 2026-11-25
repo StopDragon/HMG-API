@@ -48,6 +48,8 @@ final class AaWifi {
     private static Method getProp;
     /** 켜기·끄기 막음 로그는 프로세스마다 몇 줄만 */
     private static int blockLogs;
+    /** 2.4.10(M-2): AP 물음에 답한 값 기록(프로세스마다, 상한 ApAnswerLog.MAX) */
+    private static final ApAnswerLog answers = new ApAnswerLog();
 
     static boolean on(ModContext mod) {
         if (!mod.enabled()) return false;
@@ -75,15 +77,16 @@ final class AaWifi {
         hooked = true;
         final String who = app.processName;
         int n = 0;
-        n += hook1(mod, "isWifiApEnabled", new Object[0], Boolean.TRUE);
-        n += hook1(mod, "getWifiApMode", new Object[0], Integer.valueOf(2));
+        final String tag = PHONEPROJ.equals(app.packageName) ? "pp" : "gpm";
+        n += hook1(mod, tag, "isWifiApEnabled", new Object[0], Boolean.TRUE);
+        n += hook1(mod, tag, "getWifiApMode", new Object[0], Integer.valueOf(2));
         n += hookSet(mod, "setWifiApEnabledForConnectivity");
         n += hookSet(mod, "setWifiApEnabled");
         n += hookSet(mod, "setWifiApConfiguration");
         mod.log("Android Auto AP hooks in " + who + ": " + n + " of 5 (active only while " + PROP + "=1)");
     }
 
-    private static int hook1(final ModContext mod, final String name, Object[] types, final Object result) {
+    private static int hook1(final ModContext mod, final String tag, final String name, Object[] types, final Object result) {
         try {
             Object[] a = new Object[types.length + 1];
             System.arraycopy(types, 0, a, 0, types.length);
@@ -91,6 +94,18 @@ final class AaWifi {
                 @Override
                 protected void beforeHookedMethod(Param p) {
                     if (on(mod)) p.setResult(result);
+                }
+
+                /** 2.4.10(1.8.1 M-2): 답한 값(우리가 정했든 순정이 답했든)과 그때 신호를 남긴다. 처음 몇 번과 바뀔 때만, 상한 안에서 */
+                @Override
+                protected void afterHookedMethod(Param p) {
+                    try {
+                        if (p.hasThrowable()) return;
+                        String l = answers.line(tag, name, p.getResult(), on(mod));
+                        if (l != null) mod.log(l);
+                    } catch (Throwable t) {
+                        // 기록이 실패해도 답은 그대로
+                    }
                 }
             };
             Hooks.findAndHookMethod(WifiManager.class, name, a);

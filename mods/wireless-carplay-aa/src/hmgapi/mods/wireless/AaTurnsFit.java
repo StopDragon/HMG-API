@@ -102,6 +102,18 @@ final class AaTurnsFit implements AaTbt {
     String turnKey;
     int turnLogs;
     static final int TURN_LOGS_MAX = 300;
+    /**
+     * 2.4.10(1.8.1 I-4 준비, drafts/1.8.1-work/tbt-inv.md 1-3절): 디버그 로그가 켜졌을 때만 받은 다음 회전 거리(m)를 숫자로 남기는 곳.
+     * null이면 남기지 않는다(Wireless가 디버그일 때만 넣음). 회전 줄과 따로 센다(Wireless.aaDiagLogs, 프로세스당 DIAG_LOGS_MAX줄)
+     */
+    AaTurns.Sink diag;
+    static final int DIAG_LOGS_MAX = 1200;
+    /** 거리 진단 줄을 남기는 문턱: 회전 이벤트 뒤 첫 거리, PASS_WOBBLE 넘게 오름, 마지막으로 남긴 값보다 이만큼(m) 이상 줄어듦 */
+    static final int DIAG_DROP_STEP = 50;
+    /** 마지막으로 남긴 거리(m, 없으면 -1): 줄어듦 문턱(DIAG_DROP_STEP)에만 쓴다 */
+    int diagLast = -1;
+    /** 마지막으로 받은 거리(m, 없으면 -1): 오름 판단과 줄의 prev(회전 지남 판단 passed와 같은 기준) */
+    int diagPrev = -1;
     /** the crossroad name last sent and when; resent only when it changes or after CROSSROAD_MS */
     String crossroad;
     long crossroadAt;
@@ -132,6 +144,29 @@ final class AaTurnsFit implements AaTbt {
     /** 곧 회전 D(m): 순정 교차로 확대 안내 단계 5 + MarginalDist 50(차-1). 차 속도는 모드에서 못 읽어 보정하지 않는다 */
     static final int D_GENERAL = 350, D_EXPRESSWAY = 1050;
     static final int NEAR_TURN = 13, NEAR_UTURN = 31, NEAR_EXIT_RIGHT = 17, NEAR_EXIT_LEFT = 18;
+    /**
+     * 2.4.10(1.8.1, 카플레이 CpTurnsFit과 같은 값. 패키지가 달라 여기에 그대로 둔다): 회전교차로 곧 회전 32(L-1, 순정 니로 PHEV 11-25 표본 1개),
+     * 왼쪽 고가 44·지하차도 46(T1-1, 순정 운행 지하차도 4번·왼쪽 고가 2번, 옆길 0, 방향 90/270도)
+     */
+    static final int NEAR_ROUNDABOUT_R = 32, NEAR_OVERPASS_L = 44, NEAR_UNDERPASS = 46;
+    /**
+     * 2.4.10(#572, 소유자 승인 2026-11-25: 1.7.4 D-16 "순정 GPM대로 RIGHT만 A 계열"을 보정 층에서만 고쳐 씀. 순정 층 AaTurns는 D-16 그대로).
+     * 참이면 회전교차로 side를 "도는 방향"으로 읽는다: LEFT(반시계 = 오른쪽 통행)·모름은 A 계열(96~107), RIGHT(시계 = 왼쪽 통행)는 B 계열(192~202).
+     * 까닭: 한국 폰은 오른쪽 통행인데도 회전교차로에 side 1(LEFT)을 보낸다(#583·#79 리포트 6줄 모두). 각도 표(90 오른쪽, 270 왼쪽)도 반시계
+     * 기준이다. 순정 규칙대로면 거울 그림(B)이 나가 #572에서 HUD 그림이 반대로 보였다.
+     * **그래서 RIGHT를 보내는 앱은 2.4.9와 달리 B 계열이 된다.** RIGHT는 시계 방향(왼쪽 통행)이라는 뜻으로 읽으므로 그 앱에는 왼쪽 통행 그림이
+     * 맞다고 본다. 한국 길에서 RIGHT를 보내는 앱은 기록에 없다(확인 안 함, 차 확인 목록).
+     * L-1 곧 회전 32는 A 계열에서만 나가므로 거짓으로 되돌리면 한국 폰에서 32도 나가지 않는다.
+     * 되돌릴 때 함께 바뀌는 시험: aaturnsfit "2.4.10 #572 …"·"2.4.10 L-1: Korean …" 항목
+     */
+    static final boolean ROUNDABOUT_LEFT_IS_A = true;
+    static final String[] UNDERPASS_WORDS = { "지하차도", "지하도로" }, OVERPASS_WORDS = { "고가차도", "고가도로" };
+    /**
+     * 시설로 들어가지 않는 뜻일 수 있는 낱말(CpTurnsFit.FACILITY_NOT_WORDS와 같음, "방면"을 넣은 것은 소유자 결정 2026-11-25: 차 확인 뒤 다시 정함).
+     * AA는 안내 문구 없이 도로 이름만 오므로 부정 낱말은 대개 걸리지 않는다
+     */
+    static final String[] FACILITY_NOT_WORDS = { "옆길", "측도", "아래", "밑", "하부", "진입하지", "하지 마", "금지", "지나", "나와", "통과 후", "방면",
+            "사거리", "삼거리", "오거리", "교차로", "입구", "앞" };
     /** 마지막 차로 프레임의 차로 수(이벤트 34). 1 이상이면 이 회전에 차로 안내가 있다(M-12) */
     int laneCount;
     /** 다음 회전까지 남은 거리(m, 폰 값 그대로, 없으면 -1)와 이 회전의 열쇠(곧 회전 판단) */
@@ -188,6 +223,13 @@ final class AaTurnsFit implements AaTbt {
     int nameBase = -1;
     /** 붙잡은 뒤 마지막으로 본 거리(m) */
     int holdLast = -1;
+    /**
+     * 2.4.10(1.8.1 I-4 안 A, 소유자 결정 11-25, #603): 이번 회전에서 거리로 "같은 지점"이라고 판단해 붙잡았던 이름 바뀜의 도로 이름과
+     * 그때 회전의 열쇠(종류·방향·각도). 폰이 같은 회전 → 같은 이름 바뀜을 몇 초마다 되풀이하면, 실제 회전 이벤트가 붙잡기를 풀고 다음
+     * 이름 바뀜은 거리 없이 2초 기한(PEND_WAIT_MS)을 맞아 풀려 65가 깜빡였다. 이미 같은 지점으로 판단한 것과 같은 이름 바뀜이면 기한에서
+     * 풀지 않고 다시 붙잡는다. releaseName·forgetName, 그리고 열쇠가 다른 실제 회전이 오면 잊는다. NAME_HOLD_MS와 "거리가 늘면 풂"은 그대로다
+     */
+    String heldName, heldKey;
     String nameRoad;
     int nameSide, nameAngle, nameNumber;
     /** ② 이름만 다른 같은 꼴 회전 이벤트가 다음 거리를 기다림, 그 기준 거리(m) */
@@ -423,6 +465,11 @@ final class AaTurnsFit implements AaTbt {
             }
         } else {
             // 실제 회전 이벤트: 그 회전을 보인다(#65에서 갈림길이 다시 오면 여기). 이름 바뀜 판단은 버린다
+            // 2.4.10(I-4 안 A): 다른 회전이면 "같은 지점으로 판단한 이름 바뀜"도 잊는다(같은 회전이 되풀이되면 기억해 둠)
+            if (heldKey != null && !heldKey.equals(ev + " " + side + " " + angle)) {
+                heldName = null;
+                heldKey = null;
+            }
             turnAt = now();
             turnPassed = false;
             namePend = false;
@@ -470,7 +517,13 @@ final class AaTurnsFit implements AaTbt {
             send = true;   // 아니면 같은 회전: 거리 그대로 새 이름
             if (namePend && nameBase < 0) nameBase = remainMeters;
         }
-        if (namePend) {
+        if (namePend && heldAgain()) {
+            // 2.4.10(I-4 안 A): 이번 회전에서 이미 같은 지점으로 판단한 이름 바뀜이 되풀이됨: 풀지 않고 다시 붙잡는다(아이콘 그대로 이름만)
+            namePend = false;
+            nameHeld = true;
+            holdLast = remainMeters;
+            send = true;
+        } else if (namePend) {
             namePend = false;
             releaseName();   // 거리가 안 옴: 지난 회전 그림을 남기지 않는다(정차 중 #65는 깜빡임을 받아들임)
             send = true;
@@ -480,6 +533,12 @@ final class AaTurnsFit implements AaTbt {
         }
         if (send) sendTurn();
         armDue();
+    }
+
+    /** 2.4.10(I-4 안 A): 기다리는 이름 바뀜이 이번 회전에서 같은 지점으로 판단해 붙잡았던 것과 같고, 회전도 같고, 붙잡기 한도 안이다 */
+    boolean heldAgain() {
+        return heldName != null && heldName.equals(nameRoad) && heldKey != null && heldKey.equals(event + " " + turnSide + " " + turnAngle)
+                && !turnPassed && turnAt != 0L && now() - turnAt < NAME_HOLD_MS;
     }
 
     /** 같은 꼴 다음 회전으로 본다(거리를 모름): 곧 회전·히스테리시스를 새로 */
@@ -503,6 +562,8 @@ final class AaTurnsFit implements AaTbt {
     void forgetName() {
         namePend = false;
         nameHeld = false;
+        heldName = null;
+        heldKey = null;
         samePend = false;
         nameRoad = null;
         turnAt = 0L;
@@ -514,6 +575,8 @@ final class AaTurnsFit implements AaTbt {
     void releaseName() {
         nameHeld = false;
         namePend = false;
+        heldName = null;
+        heldKey = null;
         String r = nameRoad;
         nameRoad = null;
         turnAt = 0L;
@@ -608,6 +671,7 @@ final class AaTurnsFit implements AaTbt {
             return;
         }
         dropRerouteDue();   // T-6 ①: 폰이 거리를 줬다(그 거리와 함께 나간다)
+        diagDistance(meters, turnSinceDist);
         // 1.7.3 A-2 규칙: 다음 거리 표본 하나로 애매한 이벤트를 판단한다(위 필드 설명)
         boolean fresh = turnSinceDist;
         turnSinceDist = false;
@@ -635,6 +699,8 @@ final class AaTurnsFit implements AaTbt {
                 } else {
                     nameHeld = true;   // 같은 지점(#65): 아이콘 그대로 이름만
                     holdLast = meters;
+                    heldName = nameRoad;   // 2.4.10(I-4 안 A): 되풀이되면 기한에서 다시 붙잡도록 기억
+                    heldKey = event + " " + turnSide + " " + turnAngle;
                     if (log != null && nameHoldLogs < 20) {
                         nameHoldLogs++;
                         log.line("AA: name change kept icon " + displayType + " (ev " + event + ")");
@@ -811,6 +877,31 @@ final class AaTurnsFit implements AaTbt {
         sendHudDistance();
     }
 
+    /**
+     * 2.4.10(1.8.1 I-4 준비): 받은 다음 회전 거리 한 줄 "AA diag: dist Nm prev Pm (new|rise|drop) ev E side S"(숫자와 고정 낱말만).
+     * 1초마다 오는 거리를 다 남기면 한도를 금방 쓰므로 아래만 남긴다.
+     *  - new: 회전 이벤트 뒤 첫 거리
+     *  - rise: 바로 앞에 **받은** 거리보다 PASS_WOBBLE 넘게 오름(nextTurnDistance의 회전 지남 판단 passed와 같은 기준, prev도 그 값)
+     *  - drop: 마지막으로 **남긴** 거리보다 DIAG_DROP_STEP 이상 줄어듦(보통의 다가감을 50m마다 한 줄로)
+     * 그래서 폰이 거리를 번갈아 보내는 꼴(#603 280m ↔ 600m)과 작은 되오름(130 → 140)도 줄로 보인다
+     */
+    void diagDistance(int meters, boolean afterTurn) {
+        if (diag == null) return;
+        int prev = diagPrev;
+        diagPrev = meters;
+        try {
+            String why;
+            if (afterTurn || prev < 0 || diagLast < 0) why = "new";
+            else if (meters > prev + PASS_WOBBLE) why = "rise";
+            else if (meters <= diagLast - DIAG_DROP_STEP) why = "drop";
+            else return;
+            diag.line("AA diag: dist " + meters + "m prev " + (prev < 0 ? "-" : prev + "m") + " (" + why + ") ev " + event + " side " + turnSide);
+            diagLast = meters;
+        } catch (Throwable t) {
+            // 진단 줄이 실패해도 안내는 이어 간다
+        }
+    }
+
     /** the turn's values (numbers only: no road names) when they change, up to TURN_LOGS_MAX lines */
     void logTurn(int[] near) {
         if (log == null) return;
@@ -874,10 +965,15 @@ final class AaTurnsFit implements AaTbt {
             return null;
         }
         nearOn = true;
+        // 2.4.10(1.8.1 T1-1): 도로 이름에 고가·지하차도 낱말이 있으면 순정 번호(44·46), 옆길 0(갈림의 다른 길 비트도 넣지 않음)
+        int[] f = facilityNear(event, turnSide, road);
+        if (f != null) return new int[] { f[0], 0, f[1], bar(remainMeters, d), d };
         int bits = disp[1] < 0 ? 0 : 1 << disp[1];
         // 1.8.0(2.4.7): 갈림의 다른 길 비트는 카플레이와 같은 규칙(오른쪽 직진 비트 0, 왼쪽 22.5도 비트 1, 순정과 같음)
         // (CpTurnsFit.forkOtherBit과 같은 값. 패키지가 달라 여기에 그대로 둔다)
         if (event == FORK) bits |= turnSide == LEFT ? 1 << 1 : 1;
+        // 2.4.10: 진입 램프(왼쪽·오른쪽)는 순정 오른쪽 진입 side 3처럼 직진 비트 0을 더한다(왼쪽은 거울, 순정 값 못 봄)
+        if (event == ON_RAMP && (turnSide == LEFT || turnSide == RIGHT)) bits |= 1;
         return new int[] { disp[0], bits, disp[2], bar(remainMeters, d), d };
     }
 
@@ -910,7 +1006,8 @@ final class AaTurnsFit implements AaTbt {
     /**
      * 곧 회전 {표시 번호, 나가는 길 옆길 비트 번호(-1: 옆길 없음), 방향 칸} 또는 곧 회전 화면이 없는 회전이면 null. 순정 SetCase*:
      * 회전 13(방향: 약간 6/42, 보통 12/36, 급 18/30, 직진 0), 유턴 31(오른쪽 통행 36), 출구 17/18(12/36), 갈림 13(약간 3/45, 1.8.0 전에는 Y자 25),
-     * 회전교차로는 출구 아이콘 그대로(방향은 출구 각도). 방향을 모르는 회전(아이콘 64), 이름 바뀜·출발·목적지·페리는 멀리 있음.
+     * 회전교차로는 A 계열이면 32(2.4.10 L-1), B 계열은 출구 아이콘 그대로(방향은 출구 각도). 고가·지하차도 44·46은 near()가 도로 이름으로
+     * 바꾼다(2.4.10 T1-1). 방향을 모르는 회전(아이콘 64), 이름 바뀜·출발·목적지·페리는 멀리 있음.
      */
     static int[] nearDisplay(int ev, int side, int displayType, int direction) {
         switch (ev) {
@@ -923,8 +1020,12 @@ final class AaTurnsFit implements AaTbt {
             case STRAIGHT: case MERGE:
                 return new int[] { NEAR_TURN, 0, 0 };
             case ON_RAMP: {
-                int slot = side == RIGHT ? 6 : side == LEFT ? 42 : 0;
-                return new int[] { NEAR_TURN, slotBit(slot), slot };
+                // 2.4.10(1.8.1, 소유자 결정 11-25): 카플레이 L-2와 같게 순정 오른쪽 진입 모양 13, 22.5도(칸 3), 옆길 3(비트 0·1, 직진 비트는
+                // near()가 더함). 근거: K7 순정 운행 2026-11-25 16:29:00(표본 1개). 왼쪽 진입은 그 거울(337.5도 칸 45, 비트 0·14)로 두었고 순정 값은
+                // 못 봤다. 방향 모름은 지금처럼 직진. 전에는 오른쪽 45도(칸 6)·왼쪽 315도(칸 42)였다
+                if (side == RIGHT) return new int[] { NEAR_TURN, 1, 3 };
+                if (side == LEFT) return new int[] { NEAR_TURN, 14, 45 };
+                return new int[] { NEAR_TURN, slotBit(0), 0 };
             }
             case U_TURN:
                 return new int[] { NEAR_UTURN, -1, side == RIGHT ? 12 : 36 };
@@ -938,6 +1039,7 @@ final class AaTurnsFit implements AaTbt {
                 return side == RIGHT ? new int[] { NEAR_TURN, 1, 3 } : new int[] { NEAR_TURN, 14, 45 };
             case ROUNDABOUT_ENTER_AND_EXIT: {
                 // 회전교차로: 출구 아이콘 그대로, 방향은 출구 각도(setRoundaboutType의 direction, 시계 방향)
+                // 2.4.10(1.8.1 L-1): 오른쪽 통행 그림(A 계열 96~107)이면 순정처럼 32 + 출구 칸·비트(카플레이와 같음). B 계열은 그대로
                 if (displayType == 64 || displayType <= 0) return null;
                 int cw = ((direction % 360) + 360) % 360, bit, slot;
                 if (cw >= 348 || cw <= 12) {
@@ -951,11 +1053,36 @@ final class AaTurnsFit implements AaTbt {
                     bit = streetBit(cw);
                     slot = bit <= 7 ? 3 * bit : 3 * (bit + 1);
                 }
-                return new int[] { displayType, bit, slot };
+                return new int[] { displayType >= 96 && displayType <= 107 ? NEAR_ROUNDABOUT_R : displayType, bit, slot };
             }
             default:
                 return null;
         }
+    }
+
+    /**
+     * 2.4.10(1.8.1 T1-1): 고가·지하차도 곧 회전 {표시 번호, 방향 칸} 또는 바꾸지 않으면 null(CpTurnsFit.facilityNear와 같은 규칙).
+     * AA는 안내 문구를 주지 않아 도로 이름만 본다. 대상은 왼쪽·오른쪽이 있는 보통·약간 회전과 갈림뿐이다(급회전·유턴·램프·회전교차로·
+     * 직진은 그대로). 지하차도 46(왼쪽 칸 36, 오른쪽 칸 12), 고가는 왼쪽만 44
+     */
+    static int[] facilityNear(int ev, int side, String road) {
+        if (ev != TURN && ev != SLIGHT_TURN && ev != FORK) return null;
+        if (side != LEFT && side != RIGHT) return null;
+        int under = facilityWord(road, UNDERPASS_WORDS), over = facilityWord(road, OVERPASS_WORDS);
+        if ((under | over) >= 2 || (under != 0 && over != 0)) return null;
+        if (under == 1) return new int[] { NEAR_UNDERPASS, side == LEFT ? 36 : 12 };
+        if (over == 1 && side == LEFT) return new int[] { NEAR_OVERPASS_L, 36 };
+        return null;
+    }
+
+    /** 글 s에 words 가운데 하나가 있으면 1, 그런데 FACILITY_NOT_WORDS도 있으면 2, 없으면 0 */
+    static int facilityWord(String s, String[] words) {
+        if (s == null || s.length() == 0) return 0;
+        boolean hit = false;
+        for (String w : words) if (s.indexOf(w) >= 0) hit = true;
+        if (!hit) return 0;
+        for (String n : FACILITY_NOT_WORDS) if (s.indexOf(n) >= 0) return 2;
+        return 1;
     }
 
 
@@ -1102,7 +1229,11 @@ final class AaTurnsFit implements AaTbt {
             return;
         }
         // 순정 setRoundAboutDisplayType: side가 오른쪽이면 A 계열(96~106), 아니면 B 계열(192~202). 2.4.2에서 순정대로 바로잡음
-        boolean r = side == RIGHT;
+        // 2.4.10(1.8.1 #572): 한국 폰은 회전교차로에 side 1(LEFT, 반시계 방향 = 오른쪽 통행)을 보낸다(#583·#79 리포트 6줄 모두 ev 13 side 1).
+        // 순정 규칙대로면 오른쪽 통행인 한국 길에 왼쪽 통행 그림(B 계열)이 나가 HUD에 반대로 보였다(#572 TMHEV 네이버 지도).
+        // 각도 표(90 오른쪽, 270 왼쪽)도 반시계 방향 기준이다. 그래서 보정 층에서는 RIGHT(시계 방향)일 때만 B 계열, 그 밖은 A 계열(순정 내비도
+        // 이 회전교차로에서 HUD 목록 107 = A 계열을 보냄, 11-25 니로 PHEV). 순정 층(AaTurns)은 그대로 둔다
+        boolean r = ROUNDABOUT_LEFT_IS_A ? side != RIGHT : side == RIGHT;
         if (a == 180) { displayType = r ? 96 : 192; direction = 0; }
         else if (a >= 135 && a < 180) { displayType = r ? 97 : 193; direction = 45; }
         else if (a >= 90 && a < 135) { displayType = r ? 99 : 195; direction = 90; }

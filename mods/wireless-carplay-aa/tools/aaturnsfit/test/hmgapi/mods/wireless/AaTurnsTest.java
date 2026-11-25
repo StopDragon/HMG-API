@@ -149,6 +149,10 @@ public final class AaTurnsTest {
         forkLikeStockAa();
         marginD();
         layerChoice();
+        mode181Aa();
+        aaDiag();
+        i4Replay();
+        onRampAa();
         System.exit(fail);
     }
 
@@ -715,6 +719,25 @@ public final class AaTurnsTest {
 
         Sc mark() { markAt = t.clock; return this; }
 
+        /**
+         * 2.4.10(I-4): 재현 스크립트("<ms> ev <event> <side> <road>" / "<ms> dist <m>", ms는 첫 줄 기준 상대)를 차례로 넣는다.
+         * 첫 줄 앞에서 mark(), passAtMs(첫 줄 기준 ms, -1이면 없음)에 이르면 그 줄 앞에서 pass(이전 회전 그림 70·13)
+         */
+        Sc play(String[] script, long passAtMs) {
+            long t0 = Long.parseLong(script[0].trim().split("\\s+")[0]), last = t0;
+            mark();
+            for (String line : script) {
+                String[] p = line.trim().split("\\s+");
+                long at = Long.parseLong(p[0]);
+                if (at > last) after(at - last);
+                last = Math.max(last, at);
+                if (passAtMs >= 0 && at == passAtMs) pass(70, 13);
+                if (p[1].equals("ev")) ev(p.length > 4 ? p[4] : null, Integer.parseInt(p[3]), Integer.parseInt(p[2]));
+                else dist(Integer.parseInt(p[2]));
+            }
+            return this;
+        }
+
         /** 지난 회전 그림이 pass 뒤에 남은 시간(ms). 끝까지 남았으면 지금까지 */
         long oldLeft() {
             int shown = -1;
@@ -1063,6 +1086,17 @@ public final class AaTurnsTest {
         x.ev("Road A", R, TURN).dist(300).mark();
         for (int k = 0; k < 4; k++) x.after(2000).ev(k % 2 == 0 ? "Road B" : "Road A", R, TURN).after(10).dist(295 - k * 5);
         row("setting off: a road-name-only change still keeps the distance (no far)", x, 0, 0, true);
+        // 2.4.10(1.8.1 I-4 안 A, 소유자 결정 11-25): #603 줄 순서(drafts/1.8.1-work/tbt-inv/i4-603*.txt). 같은 회전 → 같은 이름 바뀜이 5초마다
+        x = new Sc(true).play(I4_603, -1L);
+        row("#603 turn + the same name change every 5 s, 400 m (I-4 plan A)", x, 0, 0, !x.sent(65));
+        x = new Sc(true).play(I4_603_PASS, 11000L);
+        // 바뀜 2번: 30m에서 곧 회전(70 → 13), 900m에서 이름 바뀜(13 → 65). 지난 그림은 0ms
+        row("#603 then passed (30 m -> 900 m): the name change at once", x, 0, 2, x.sent(65));
+        x = new Sc(true).play(I4_603_NOTURN, -1L);
+        x.after(10000);
+        row("#603 then the phone stops sending turns: 65 at the 8 s limit", x, 0, 1, x.sent(65));
+        x = new Sc(true).play(I4_603_NEAR, -1L);
+        row("#603 near (+3 s at 600 m beyond D): flicker left (plan B not adopted)", x, 0, 8, x.sent(65));
 
         // L3: Handler가 직접 돌리는 타이머(nameDue, tick) 안에서 예외가 나도 밖으로 나가지 않는다(나가면 GPM이 죽음)
         x = new Sc(true);
@@ -1138,11 +1172,11 @@ public final class AaTurnsTest {
     /** 2.4.4 후보(나): AA 큰 그림의 옆길 비트를 순정 값에 맞춘다(왼쪽 절반 비트 8~14, 방향 칸은 그대로) */
     static void stockSideBitsAa() {
         final int LEFT = 1, RIGHT = 2, TURN = 4, SLIGHT = 3, SHARP = 5, ON_RAMP = 7, RB = 13;
-        check("2.4.4 AA stock side bits: left [13, 11, 36], sharp left [13, 9, 30], slight left [13, 13, 42], left on-ramp [13, 13, 42]",
+        check("2.4.4 AA stock side bits: left [13, 11, 36], sharp left [13, 9, 30], slight left [13, 13, 42]; left on-ramp [13, 14, 45] (2.4.10: mirror of the stock right on-ramp, was [13, 13, 42])",
                 java.util.Arrays.toString(AaTurnsFit.nearDisplay(TURN, LEFT, 70, 270)).equals("[13, 11, 36]")
                         && java.util.Arrays.toString(AaTurnsFit.nearDisplay(SHARP, LEFT, 72, 225)).equals("[13, 9, 30]")
                         && java.util.Arrays.toString(AaTurnsFit.nearDisplay(SLIGHT, LEFT, 71, 315)).equals("[13, 13, 42]")
-                        && java.util.Arrays.toString(AaTurnsFit.nearDisplay(ON_RAMP, LEFT, 71, 315)).equals("[13, 13, 42]"));
+                        && java.util.Arrays.toString(AaTurnsFit.nearDisplay(ON_RAMP, LEFT, 71, 315)).equals("[13, 14, 45]"));
         check("2.4.4 AA stock side bits: right side unchanged [13, 4, 12], [13, 2, 6], [13, 6, 18]",
                 java.util.Arrays.toString(AaTurnsFit.nearDisplay(TURN, RIGHT, 67, 90)).equals("[13, 4, 12]")
                         && java.util.Arrays.toString(AaTurnsFit.nearDisplay(SLIGHT, RIGHT, 66, 45)).equals("[13, 2, 6]")
@@ -1432,6 +1466,273 @@ public final class AaTurnsTest {
         check("2.4.3 layer: tbt_fit off at 200 m: the stock frame (67, side street 65535, bar 32), no near layout", "tbt 67 65535 90.0 200.0 0 0 0 32 0".equals(last("tbt ")));
     }
 
+    /**
+     * 2.4.10(1.8.1 I-4 준비): AA 거리 진단 줄. #603 곧 회전 구간의 줄 순서(drafts/1.8.1-work/tbt-inv/i4-603-near.txt 앞부분:
+     * 거리 600 → 이름 바뀜 → 280 → 회전 → 이름 바뀜 → 600 → … → 175)를 넣어 번갈아 오는 거리가 줄로 보이는지 본다. 도로 이름은 만든 것
+     */
+    static void aaDiag() {
+        Car.unit = Car.DISTANCE_KM;
+        final int LEFT = 1, TURN = 4, NAME = 2;
+        final java.util.List<String> d = new java.util.ArrayList<String>();
+        c = new Cluster();
+        AaTurnsFit t = new AaTurnsFit(new android.content.Context(), c, new Handler());
+        t.diag = new AaTurns.Sink() {
+            @Override
+            public void line(String s) {
+                d.add(s);
+            }
+        };
+        t.status(1);
+        t.nextTurn("RoadA", LEFT, TURN, -1, 0);
+        t.nextTurnDistance(600, 0, 600, 1);
+        t.nextTurn("RoadB", 3, NAME, -1, 0);
+        t.nextTurnDistance(280, 0, 280, 1);
+        t.nextTurn("RoadA", LEFT, TURN, -1, 0);
+        t.nextTurn("RoadB", 3, NAME, -1, 0);
+        t.nextTurn("RoadA", LEFT, TURN, -1, 0);
+        t.nextTurnDistance(600, 0, 600, 1);
+        t.nextTurn("RoadB", 3, NAME, -1, 0);
+        t.nextTurnDistance(590, 0, 590, 1);   // 이름 바뀜(붙잡지 않은 새 이벤트) 뒤 첫 거리: new
+        t.nextTurnDistance(570, 0, 570, 1);   // 20m 줆: 줄 없음
+        t.nextTurnDistance(540, 0, 540, 1);   // 마지막으로 남긴 590에서 50m 줆: drop
+        t.nextTurnDistance(542, 0, 542, 1);   // 흔들림 2m: 줄 없음
+        t.nextTurnDistance(175, 0, 175, 1);
+        String all = d.toString();
+        // 이름 바뀜을 같은 회전으로 붙잡는 동안(A-2)은 회전 이벤트가 와도 "같은 회전"이라 600 → 280은 drop, 280 → 600은 rise로 남는다:
+        // 폰이 거리를 번갈아 보내는 꼴이 그대로 보인다
+        check("I-4 diag: AA distance lines: new 600, drop 280, rise 600 (the #603 alternation), new 590, drop 540, drop 175; no line for small moves (got " + all + ")",
+                d.size() == 6 && d.get(0).equals("AA diag: dist 600m prev - (new) ev 4 side 1")
+                        && d.get(1).startsWith("AA diag: dist 280m prev 600m (drop) ev ")
+                        && d.get(2).startsWith("AA diag: dist 600m prev 280m (rise) ev ")
+                        && d.get(3).startsWith("AA diag: dist 590m prev 600m (new) ")
+                        && d.get(4).startsWith("AA diag: dist 540m prev 570m (drop) ")
+                        && d.get(5).startsWith("AA diag: dist 175m prev 542m (drop) "));
+        // 같은 회전에서 거리가 다시 오르면 rise
+        d.clear();
+        t.nextTurnDistance(420, 0, 420, 1);
+        check("I-4 diag: same turn, 175 -> 420 m: a rise line with the previous value (got " + d + ")",
+                d.size() == 1 && d.get(0).startsWith("AA diag: dist 420m prev 175m (rise) "));
+        // 작은 되오름: 420 → 380(줄 없음) → 330(drop, 50m) → 300(줄 없음) → 310(앞에 받은 300보다 10m 오름: rise, prev 300)
+        d.clear();
+        t.nextTurnDistance(380, 0, 380, 1);
+        t.nextTurnDistance(330, 0, 330, 1);
+        t.nextTurnDistance(300, 0, 300, 1);
+        t.nextTurnDistance(310, 0, 310, 1);
+        check("I-4 diag: a small rise against the last received value (300 -> 310) is logged with prev 300 (the passed rule), not against the last logged 330 (got " + d + ")",
+                d.size() == 2 && d.get(0).startsWith("AA diag: dist 330m prev 380m (drop) ") && d.get(1).startsWith("AA diag: dist 310m prev 300m (rise) "));
+        // 숫자와 고정 낱말만(도로 이름 없음)
+        boolean clean = true;
+        for (String x : d) if (x.contains("Road")) clean = false;
+        check("I-4 diag: no road names in the lines; head matches 'AA diag: dist -?[0-9]+m'", clean && d.get(0).matches("^AA diag: dist -?[0-9]+m .*"));
+        // 디버그가 아니면(diag null) 줄 없음, 안내는 같음
+        c = new Cluster();
+        AaTurnsFit u = new AaTurnsFit(new android.content.Context(), c, new Handler());
+        u.status(1);
+        u.nextTurn("RoadA", LEFT, TURN, -1, 0);
+        u.nextTurnDistance(600, 0, 600, 1);
+        check("I-4 diag: no sink (debug off): nothing logged, the turn still goes out", last("tbt ") != null && u.diag == null);
+        check("I-4 diag: cap constant 1200 per process (Wireless.aaDiagLogs), separate from the 300 turn lines", AaTurnsFit.DIAG_LOGS_MAX == 1200 && AaTurnsFit.TURN_LOGS_MAX == 300);
+    }
+
+    /** I-4 재현 입력(drafts/1.8.1-work/tbt-inv/의 i4-603*.txt를 옮김, 도로 이름은 RoadA·RoadB). 한 줄: "<ms> ev <event> <side> <road>" 또는 "<ms> dist <m>" */
+    static final String[] I4_603 = { "-2000 ev 4 1 RoadA", "-1990 dist 400", "-1000 ev 2 3 RoadB", "0 dist 400", "10 ev 4 1 RoadA", "20 ev 2 3 RoadB", "3000 ev 4 1 RoadA", "3010 dist 400", "4000 ev 2 3 RoadB", "5000 dist 400", "5010 ev 4 1 RoadA", "5020 ev 2 3 RoadB", "8000 ev 4 1 RoadA", "8010 dist 400", "9000 ev 2 3 RoadB", "10000 dist 400", "10010 ev 4 1 RoadA", "10020 ev 2 3 RoadB", "13000 ev 4 1 RoadA", "13010 dist 400", "14000 ev 2 3 RoadB", "15000 dist 400", "15010 ev 4 1 RoadA", "15020 ev 2 3 RoadB", "18000 ev 4 1 RoadA", "18010 dist 400", "19000 ev 2 3 RoadB", "20000 dist 400", "20010 ev 4 1 RoadA", "20020 ev 2 3 RoadB", "23000 ev 4 1 RoadA", "23010 dist 400", "24000 ev 2 3 RoadB" };
+    static final String[] I4_603_NEAR = { "-2000 ev 4 1 RoadA", "-1990 dist 600", "-1000 ev 2 3 RoadB", "0 dist 280", "10 ev 4 1 RoadA", "20 ev 2 3 RoadB", "3000 ev 4 1 RoadA", "3010 dist 600", "4000 ev 2 3 RoadB", "5000 dist 175", "5010 ev 4 1 RoadA", "5020 ev 2 3 RoadB", "8000 ev 4 1 RoadA", "8010 dist 600", "9000 ev 2 3 RoadB", "10000 dist 150" };
+    static final String[] I4_603_PASS = { "-2000 ev 4 1 RoadA", "-1990 dist 400", "-2000 ev 4 1 RoadA", "-1990 dist 400", "-1000 ev 2 3 RoadB", "0 dist 400", "10 ev 4 1 RoadA", "20 ev 2 3 RoadB", "3000 ev 4 1 RoadA", "3010 dist 400", "4000 ev 2 3 RoadB", "5000 dist 400", "5010 ev 4 1 RoadA", "5020 ev 2 3 RoadB", "8000 ev 4 1 RoadA", "8010 dist 400", "9000 ev 2 3 RoadB", "10000 dist 30", "11000 dist 900", "12000 ev 2 3 RoadB", "13000 dist 880" };
+    static final String[] I4_603_NOTURN = { "-2000 ev 4 1 RoadA", "-1990 dist 400", "-2000 ev 4 1 RoadA", "-1990 dist 400", "-1000 ev 2 3 RoadB", "0 dist 400", "10 ev 4 1 RoadA", "20 ev 2 3 RoadB", "3000 ev 4 1 RoadA", "3010 dist 400", "4000 ev 2 3 RoadB", "5000 dist 400", "5010 ev 4 1 RoadA", "5020 ev 2 3 RoadB", "9000 ev 2 3 RoadB", "9010 dist 400", "11000 ev 2 3 RoadB", "11010 dist 400", "13000 ev 2 3 RoadB", "13010 dist 400", "15000 ev 2 3 RoadB", "15010 dist 400", "17000 ev 2 3 RoadB", "17010 dist 400", "19000 ev 2 3 RoadB", "19010 dist 400" };
+
+    /**
+     * I-4 재생: 줄마다 폰 콜백 하나, 줄 사이에 걸린 타이머(nameDue)는 걸린 시각에 돈다(tbt-inv Replay.java와 같은 방식).
+     * 돌려주는 것: 계기판 tbt 표시 번호가 바뀐 때마다 "시각(ms) 번호"
+     */
+    static java.util.List<String> i4Run(String[] script) {
+        Car.unit = Car.DISTANCE_KM;
+        c = new Cluster();
+        final Handler h = new Handler();
+        final AaTurnsFit t = new AaTurnsFit(new android.content.Context(), c, h);
+        final long base = 90000000L;
+        t.clock = base;
+        Handler.now = base;
+        t.status(1);
+        java.util.List<String> out = new java.util.ArrayList<String>();
+        int[] lastIcon = { Integer.MIN_VALUE };
+        for (String line : script) {
+            String[] p = line.trim().split("\\s+");
+            long at = base + Long.parseLong(p[0]);
+            while (true) {
+                Runnable next = null;
+                long best = Long.MAX_VALUE;
+                for (Runnable x : h.pending) {
+                    Long d = h.dueAt.get(x);
+                    if (d != null && d <= at && d < best) {
+                        best = d;
+                        next = x;
+                    }
+                }
+                if (next == null) break;
+                t.clock = Math.max(t.clock, best);
+                Handler.now = t.clock;
+                h.runPending(next);
+                i4Frames(t.clock - base, out, lastIcon);
+            }
+            t.clock = Math.max(t.clock, at);
+            Handler.now = t.clock;
+            if (p[1].equals("ev")) t.nextTurn(p.length > 4 ? p[4] : null, Integer.parseInt(p[3]), Integer.parseInt(p[2]), -1, 0);
+            else if (p[1].equals("dist")) t.nextTurnDistance(Integer.parseInt(p[2]), 20, Integer.parseInt(p[2]), AaTurnsFit.METERS);
+            i4Frames(t.clock - base, out, lastIcon);
+        }
+        // 끝난 뒤 남은 타이머(한도 풀기)도 돌린다
+        for (int k = 0; k < 10 && !h.pending.isEmpty(); k++) {
+            Runnable next = null;
+            long best = Long.MAX_VALUE;
+            for (Runnable x : h.pending) {
+                Long d = h.dueAt.get(x);
+                if (d != null && d < best) {
+                    best = d;
+                    next = x;
+                }
+            }
+            if (next == null) break;
+            t.clock = Math.max(t.clock, best);
+            Handler.now = t.clock;
+            h.runPending(next);
+            i4Frames(t.clock - base, out, lastIcon);
+        }
+        return out;
+    }
+
+    static void i4Frames(long at, java.util.List<String> out, int[] lastIcon) {
+        for (String x : c.calls) {
+            if (!x.startsWith("tbt ")) continue;
+            int icon = Integer.parseInt(x.split(" ")[1]);
+            if (icon != lastIcon[0]) out.add(at + " " + icon);
+            lastIcon[0] = icon;
+        }
+        c.calls.clear();
+    }
+
+    /** 표시 번호 icon으로 바뀐 횟수 */
+    static int i4Count(java.util.List<String> r, int icon) {
+        int n = 0;
+        for (String x : r) if (x.endsWith(" " + icon)) n++;
+        return n;
+    }
+
+    /** icon으로 처음 바뀐 시각(ms), 없으면 -1 */
+    static long i4First(java.util.List<String> r, int icon) {
+        for (String x : r) if (x.endsWith(" " + icon)) return Long.parseLong(x.split(" ")[0]);
+        return -1L;
+    }
+
+    /**
+     * 2.4.10(1.8.1 I-4 안 A, 소유자 결정 11-25, drafts/1.8.1-work/tbt-inv.md 1-3절): #603 줄 순서 재생. A-2 시나리오 표에 더한 줄
+     */
+    static void i4Replay() {
+        java.util.List<String> r = i4Run(I4_603);
+        check("I-4 i4-603 (far): the same name change judged same-point comes back each cycle: no 65 while the phone keeps cycling (2.4.9: 65 at 2.02, 7.02, 12.02, 17.02, 22.02 s); after the input ends, 65 at the 8 s limit (23 s -> 31 s) (got " + r + ")",
+                i4Count(r, 65) == 1 && i4First(r, 65) == 31000L && r.get(0).equals("0 70"));
+        r = i4Run(I4_603_NEAR);
+        check("I-4 i4-603-near (+3 s, 600 m beyond D): plan A alone leaves this flicker (plan B not adopted, owner 11-25) (got " + r + ")",
+                i4Count(r, 65) >= 1);
+        r = i4Run(I4_603_PASS);
+        long t900 = 11000L;
+        check("I-4 i4-603-pass (30 m -> 900 m, the turn passed): the name change shows right at 900 m, as 2.4.9 (got " + r + ")",
+                i4First(r, 65) >= t900 && i4First(r, 65) <= t900 + 1000L && i4Count(r, 65) == 1);
+        r = i4Run(I4_603_NOTURN);
+        check("I-4 i4-603-noturn (the phone stops sending turns): 65 comes 8 s after the last turn event (5.01 s -> 13.01 s), not at the 2 s pend (got " + r + ")",
+                i4First(r, 65) == 13010L);
+    }
+
+    /** 2.4.10(1.8.1, 소유자 결정 11-25): AA 진입 램프 곧 회전을 카플레이 L-2와 같게(순정 K7 13, 22.5도, 옆길 3) */
+    static void onRampAa() {
+        final int LEFT = 1, RIGHT = 2, ON_RAMP = 7;
+        String r = aaNear("Ramp", RIGHT, ON_RAMP, -1, 400, 120);
+        check("2.4.10 AA on-ramp right: 13, side 3 (bits 0 and 1), 22.5 as the stock K7 (was 45.0, bit 2) (got " + r + ")",
+                r != null && r.startsWith("tbt 13 3 22.5 120.0 "));
+        r = aaNear("Ramp", LEFT, ON_RAMP, -1, 400, 120);
+        check("2.4.10 AA on-ramp left: the mirror 13, side 16385 (bits 0 and 14), 337.5 (not seen on a stock car) (got " + r + ")",
+                r != null && r.startsWith("tbt 13 16385 337.5 120.0 "));
+        r = aaNear("Ramp", 3, ON_RAMP, -1, 400, 120);
+        check("2.4.10 AA on-ramp, side unknown: straight as before (13, bit 0, 0.0) (got " + r + ")", r != null && r.startsWith("tbt 13 1 0.0 120.0 "));
+        r = aaNear("Ramp", RIGHT, ON_RAMP, -1, 900);
+        check("2.4.10 AA on-ramp far: unchanged 161 (got " + r + ")", r != null && r.startsWith("tbt 161 0 0.0 900.0 "));
+    }
+
+    /** 새 AA 안내 하나: 회전 하나를 받고 거리 meters들을 차례로 받은 뒤 마지막 tbt 줄 */
+    static String aaNear(String road, int side, int ev, int angle, int... meters) {
+        c = new Cluster();
+        AaTurnsFit t = new AaTurnsFit(new android.content.Context(), c, new Handler());
+        t.status(1);
+        t.nextTurn(road, side, ev, angle, 0);
+        for (int m : meters) t.nextTurnDistance(m, 0, m, 1);
+        return last("tbt ");
+    }
+
+    /**
+     * 2.4.10(1.8.1): #572 회전교차로 그림 계열, L-1 회전교차로 32, T1-1 고가·지하차도(AA는 도로 이름만 봄).
+     * 한국 폰의 회전교차로 side: #583·#79 리포트의 6줄 모두 "ev 13 side 1"(LEFT). 도로 이름은 만든 것이다
+     */
+    static void mode181Aa() {
+        Car.unit = Car.DISTANCE_KM;
+        final int LEFT = 1, RIGHT = 2, TURN = 4, SLIGHT = 3, SHARP = 5, U_TURN = 6, ON_RAMP = 7, FORK = 9, RB = 13, STRAIGHT = 14;
+        // #572: 한국 폰(LEFT = 반시계 방향)의 회전교차로는 A 계열(오른쪽 통행 그림). 멀리·HUD 목록 모두
+        String far = aaNear("Circle", LEFT, RB, 90, 500);
+        String hud = last("hud ");
+        check("2.4.10 #572: Korean phone roundabout (side LEFT, angle 90) far: A family 99, not B 195 (got " + far + ")",
+                far != null && far.startsWith("tbt 99 0 0.0 500.0 "));
+        check("2.4.10 #572: the HUD list gets 99 (0x63), not 195 (got " + hud + ")", hud != null && hud.startsWith("hud f20163"));
+        check("2.4.10 #572: LEFT angles: 180 -> 96, 150 -> 97, 270 -> 105 (A family; were 192, 193, 201)",
+                aaNear("Circle", LEFT, RB, 180, 500).startsWith("tbt 96 ") && aaNear("Circle", LEFT, RB, 150, 500).startsWith("tbt 97 ")
+                        && aaNear("Circle", LEFT, RB, 270, 500).startsWith("tbt 105 "));
+        check("2.4.10 #572: unspecified side also A family (Korea drives on the right): 99",
+                aaNear("Circle", 3, RB, 90, 500).startsWith("tbt 99 "));
+        String b = aaNear("Circle", RIGHT, RB, 90, 500);
+        check("2.4.10 #572: RIGHT (clockwise, left-hand traffic) keeps the B family 195 (got " + b + ")", b != null && b.startsWith("tbt 195 "));
+        // L-1: 곧 회전은 32, 출구 칸·비트. 400m → 90m(D 350m): 막대 20(순정 07:40:21의 90m 20과 같음)
+        // AA 각도는 반시계로 돈 호(90 오른쪽, 180 직진, 270 왼쪽): 225는 방향 315도(약간 왼쪽) 출구, 순정 표본과 같은 방향
+        String l1 = aaNear("Circle", LEFT, RB, 225, 400, 90);
+        check("2.4.10 L-1: Korean roundabout, arc 225 (exit heading 315, slight left), 90 m: 32, exit bit 13 (8192), 315.0, bar 20 (got " + l1 + ")",
+                l1 != null && l1.startsWith("tbt 32 8192 315.0 90.0 ") && l1.endsWith(" 20 0"));
+        l1 = aaNear("Circle", LEFT, RB, 90, 400, 200);
+        check("2.4.10 L-1: right exit (angle 90): 32, bit 4 (16), 90.0 (got " + l1 + ")", l1 != null && l1.startsWith("tbt 32 16 90.0 200.0 "));
+        b = aaNear("Circle", RIGHT, RB, 90, 400, 200);
+        check("2.4.10 L-1: B family keeps its icon near: 195 (got " + b + ")", b != null && b.startsWith("tbt 195 16 90.0 200.0 "));
+        String hudNear = last("hud ");
+        check("2.4.10 L-1: the HUD list still gets the exit icon, not 32 (got " + hudNear + ")", hudNear != null && hudNear.startsWith("hud f201c3"));
+        String hudA = null;
+        aaNear("Circle", LEFT, RB, 90, 400, 200);
+        hudA = last("hud ");
+        check("2.4.10 L-1: with 32 near, the HUD list is the A icon 99 (got " + hudA + ")", hudA != null && hudA.startsWith("hud f20163"));
+
+        // T1-1: 도로 이름의 지하차도 46(오른쪽 90, 왼쪽 270, 옆길 0), 왼쪽 고가 44
+        Object[][] tc = {
+            { "반포지하차도", RIGHT, TURN, "tbt 46 0 90.0 300.0 ", "underpass, right turn: 46, side 0, 90" },
+            { "반포지하차도", LEFT, TURN, "tbt 46 0 270.0 300.0 ", "underpass, left turn: 46, side 0, 270" },
+            { "OO지하도로", RIGHT, SLIGHT, "tbt 46 0 90.0 300.0 ", "지하도로, slight right: 46 at 90" },
+            { "OO지하차도", LEFT, FORK, "tbt 46 0 270.0 300.0 ", "underpass, keep left: 46 at 270, no fork bits" },
+            { "OO고가차도", LEFT, TURN, "tbt 44 0 270.0 300.0 ", "overpass, left: 44, side 0, 270" },
+            { "OO고가도로", LEFT, FORK, "tbt 44 0 270.0 300.0 ", "고가도로, keep left: 44, no fork bits" },
+            { "OO고가차도", RIGHT, TURN, "tbt 13 16 90.0 300.0 ", "overpass on the right: unchanged (Y-8)" },
+            { "OO지하차도 방면", RIGHT, TURN, "tbt 13 16 90.0 300.0 ", "방면: unchanged" },
+            { "고가차도 옆길", LEFT, TURN, "tbt 13 2048 270.0 300.0 ", "옆길: unchanged" },
+            { "OO고가차도사거리", LEFT, TURN, "tbt 13 2048 270.0 300.0 ", "intersection named after an overpass: unchanged" },
+            { "OO지하차도", RIGHT, SHARP, "tbt 13 64 135.0 300.0 ", "sharp right: unchanged" },
+            { "OO지하차도", RIGHT, U_TURN, "tbt 31 ", "U-turn: unchanged" },
+            { "OO지하차도", RIGHT, ON_RAMP, "tbt 13 ", "on-ramp: unchanged" },
+            { "OO지하차도", 3, STRAIGHT, "tbt 13 1 0.0 300.0 ", "straight: unchanged" },
+            { "OO지하차도", 3, TURN, null, "turn without a side: no near layout (as before)" },
+            { "Main St", RIGHT, TURN, "tbt 13 16 90.0 300.0 ", "no facility word: unchanged" },
+        };
+        for (Object[] k : tc) {
+            String l = aaNear((String) k[0], (Integer) k[1], (Integer) k[2], -1, 400, 300);
+            boolean ok = k[3] == null ? l != null && !l.startsWith("tbt 46 ") && !l.startsWith("tbt 44 ") : l != null && l.startsWith((String) k[3]);
+            check("2.4.10 T1-1 AA: " + k[4] + " (got " + l + ")", ok);
+        }
+        String f = aaNear("반포지하차도", RIGHT, TURN, -1, 900);
+        check("2.4.10 T1-1 AA: far (900 m) unchanged: 67, bar invalid (got " + f + ")", f != null && f.startsWith("tbt 67 0 0.0 900.0 ") && f.endsWith(" 0 -1"));
+        check("2.4.10 T1-1 AA: facilityWord", AaTurnsFit.facilityWord("반포지하차도", AaTurnsFit.UNDERPASS_WORDS) == 1
+                && AaTurnsFit.facilityWord("지하차도 지나서", AaTurnsFit.UNDERPASS_WORDS) == 2 && AaTurnsFit.facilityWord(null, AaTurnsFit.OVERPASS_WORDS) == 0);
+    }
+
     static String last(String prefix) {
         String r = null;
         for (String x : c.calls) if (x.startsWith(prefix)) r = x;
@@ -1442,7 +1743,7 @@ public final class AaTurnsTest {
     static void near172() {
         final int RIGHT = 2, LEFT = 1, TURN = 4, SLIGHT = 3, SHARP = 5, U_TURN = 6, OFF_RAMP = 8, FORK = 9, NAME = 2, DEPART = 1, DEST = 19,
                 RB_EXIT = 13, RB_EXIT_ONLY = 12, METERS = 1;
-        check("1.7.2 M-12 display: turns 13 (slight/turn/sharp right 6/12/18, left 42/36/30), U-turn 31 (36), exits 17/18, fork 13 (1.8.0)",
+        check("1.7.2 M-12 display: turns 13 (slight/turn/sharp right 6/12/18, left 42/36/30), U-turn 31 (36), exits 17/18, fork 13 (1.8.0), roundabout A family 32 (2.4.10 L-1)",
                 java.util.Arrays.toString(AaTurnsFit.nearDisplay(TURN, RIGHT, 67, 90)).equals("[13, 4, 12]")
                         && java.util.Arrays.toString(AaTurnsFit.nearDisplay(TURN, LEFT, 70, 270)).equals("[13, 11, 36]")
                         && java.util.Arrays.toString(AaTurnsFit.nearDisplay(SLIGHT, RIGHT, 66, 30)).equals("[13, 2, 6]")
@@ -1451,8 +1752,9 @@ public final class AaTurnsTest {
                         && java.util.Arrays.toString(AaTurnsFit.nearDisplay(OFF_RAMP, RIGHT, 164, 30)).equals("[17, -1, 12]")
                         && java.util.Arrays.toString(AaTurnsFit.nearDisplay(OFF_RAMP, LEFT, 165, 330)).equals("[18, -1, 36]")
                         && java.util.Arrays.toString(AaTurnsFit.nearDisplay(FORK, RIGHT, 173, 0)).equals("[13, 1, 3]")
-                        && java.util.Arrays.toString(AaTurnsFit.nearDisplay(RB_EXIT, 0, 99, 90)).equals("[99, 4, 12]")
-                        && java.util.Arrays.toString(AaTurnsFit.nearDisplay(RB_EXIT, 0, 102, 180)).equals("[102, 8, 27]"));
+                        // 2.4.10(1.8.1 L-1): 오른쪽 통행 그림(A 계열)의 회전교차로 곧 회전은 32(전에는 출구 아이콘 99·102)
+                        && java.util.Arrays.toString(AaTurnsFit.nearDisplay(RB_EXIT, 0, 99, 90)).equals("[32, 4, 12]")
+                        && java.util.Arrays.toString(AaTurnsFit.nearDisplay(RB_EXIT, 0, 102, 180)).equals("[32, 8, 27]"));
         check("1.7.2 M-12 display: unknown side, name change, departure, destination, unknown roundabout: no near layout",
                 AaTurnsFit.nearDisplay(TURN, 3, 64, 0) == null && AaTurnsFit.nearDisplay(NAME, 0, 65, 0) == null
                         && AaTurnsFit.nearDisplay(DEPART, 0, 2, 0) == null && AaTurnsFit.nearDisplay(DEST, 0, 3, 0) == null

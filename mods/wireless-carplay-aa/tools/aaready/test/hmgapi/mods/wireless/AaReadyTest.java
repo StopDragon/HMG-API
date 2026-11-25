@@ -403,11 +403,233 @@ public final class AaReadyTest {
         n = AaReady.resend(cl, new Object(), LOG, -1L, -1L);
         check("A-1: a listener object without this$0 (another structure): -1, one line", n == -1 && sent.isEmpty() && logs.size() == 1);
 
+        i3(cl, svc, pp);
+        m2();
+
         // 로그에 주소·시리얼이 없음
         boolean clean = true;
         for (String s : allLogs) if (s.contains("00:11") || s.contains("SER-")) clean = false;
         check("A-1: no address or serial in any log line (" + allLogs.size() + " lines)", clean && allLogs.size() >= 10);
         System.exit(fail);
+    }
+    /** 2.4.10(1.8.1 M-2): AP 물음에 답한 값 기록. 물음마다 처음 5번, 그 뒤 값이 바뀔 때만, 프로세스당 40줄 */
+    static void m2() {
+        ApAnswerLog a = new ApAnswerLog();
+        List<String> got = new ArrayList<String>();
+        for (int k = 0; k < 8; k++) {
+            String l = a.line("pp", "isWifiApEnabled", Boolean.FALSE, false);
+            if (l != null) got.add(l);
+        }
+        check("M-2: the same answer: the first 5 only, numbers and fixed words ('Android Auto AP answer: pp isWifiApEnabled false sig 0')",
+                got.size() == 5 && got.get(0).equals("Android Auto AP answer: pp isWifiApEnabled false sig 0"));
+        String ch = a.line("pp", "isWifiApEnabled", Boolean.TRUE, true);
+        String same = a.line("pp", "isWifiApEnabled", Boolean.TRUE, true);
+        String back = a.line("pp", "isWifiApEnabled", Boolean.FALSE, false);
+        check("M-2: after the first 5, a change is logged each time, the same value is not",
+                "Android Auto AP answer: pp isWifiApEnabled true sig 1".equals(ch) && same == null && back != null);
+        String mode = a.line("pp", "getWifiApMode", Integer.valueOf(2), true);
+        check("M-2: each question counts on its own (getWifiApMode 2 sig 1)", "Android Auto AP answer: pp getWifiApMode 2 sig 1".equals(mode));
+        int n = got.size() + 3;
+        String l = null, lastLine = null;
+        for (int k = 0; k < 100; k++) {
+            l = a.line("gpm", "getWifiApMode", Integer.valueOf(k % 2 == 0 ? 0 : 2), k % 2 == 0);
+            if (l != null) {
+                n++;
+                lastLine = l;
+            }
+        }
+        check("M-2: at most 40 lines per process even when the answer keeps changing, the 40th says so (got " + n + ")",
+                n == ApAnswerLog.MAX && lastLine != null && lastLine.endsWith("(limit 40)") && a.line("pp", "isWifiApEnabled", Boolean.TRUE, true) == null);
+    }
+
+    /** I-3 시험의 신호 값(가짜) */
+    static final boolean[] I3_SIG = { false };
+    static final AaReady.Signal I3_SIGNAL = new AaReady.Signal() {
+        @Override
+        public boolean on() {
+            return I3_SIG[0];
+        }
+
+        @Override
+        public boolean modOff() {
+            return false;
+        }
+    };
+
+    /**
+     * I-3 한 장면: 폰 A만 버전 응답까지 마친 GPM. runningPP는 since(= Sched 0초)에 온다. events는 {시각(ms, since 기준, 음수면 runningPP 전),
+     * 일} 차례다. 일: "off1"(신호 0에서 순정 준비 1), "on1"(신호 1에서 순정 준비 1), "stock0"(순정 준비 0), "sig"(신호 1이 됨),
+     * "pp"(runningPP가 또 옴), "busy"(GPM 연결 중). 끝나면 남은 대기열을 모두 돌린다
+     */
+    static void i3Scene(final ClassLoader cl, GalReceiverService svc, final Object pp, Object[][] events) {
+        clear();
+        AaReady.clearReady();
+        WirelessExplorer we = WirelessExplorer.reset();
+        listener(null);
+        we.rfcomm(A);
+        we.version(A, "SER-A", true);
+        svc.connectMode = 0;
+        I3_SIG[0] = false;
+        final long since = 50000L;
+        final Sched sch = new Sched();
+        final Runnable job = new Runnable() {
+            @Override
+            public void run() {
+                AaReady.resend(cl, pp, LOG, since, since + sch.now);
+            }
+        };
+        boolean started = false;
+        for (Object[] e : events) {
+            long t = ((Number) e[0]).longValue();
+            if (t >= 0 && !started) {
+                AaReady.onRunningPP(I3_SIGNAL, sch, job, LOG);
+                started = true;
+            }
+            if (started) sch.runUntil(t);
+            WLDeviceInfo a = new WLDeviceInfo(A, "SER-A");
+            String k = (String) e[1];
+            if ("off1".equals(k)) AaReady.noteReady(a, Integer.valueOf(1), since + t, false);
+            else if ("on1".equals(k)) AaReady.noteReady(a, Integer.valueOf(1), since + t, true);
+            else if ("stock0".equals(k)) AaReady.noteReady(a, Integer.valueOf(0), since + t, I3_SIG[0]);
+            else if ("sig".equals(k)) I3_SIG[0] = true;
+            else if ("busy".equals(k)) svc.connectMode = 1;
+            else if ("pp".equals(k)) {
+                // 새 runningPP: 순정처럼 그 시각을 since로 삼는 새 일을 건다(Wireless.aaReadyHooks와 같음)
+                final long since2 = since + t;
+                AaReady.onRunningPP(I3_SIGNAL, sch, new Runnable() {
+                    @Override
+                    public void run() {
+                        AaReady.resend(cl, pp, LOG, since2, since + sch.now);
+                    }
+                }, LOG);
+            }
+        }
+        if (!started) AaReady.onRunningPP(I3_SIGNAL, sch, job, LOG);
+        sch.runAll(null);
+        svc.connectMode = 0;
+    }
+
+    static List<String> list(String... v) {
+        return java.util.Arrays.asList(v);
+    }
+
+    /**
+     * 2.4.10(1.8.1 I-3, 설계 drafts/1.8.1-work/design-i1-i3.md 2-7절 이름 그대로). 순정 PP smali(2026-11-25 읽음)대로 AP 꺼짐 때 받은
+     * 준비(1)가 있는 기기에는 0 → 1을 보낸다(설계 2-4절 "있으면" 갈래). 줄 순서는 #620 06:48(runningPP 49.74, 순정 준비 1 52.99,
+     * 신호 06:49:14, 다시 보냄 15.71)과 #613 15:04:03·15:04:33(준비 1 → 준비 0 → 준비 1, 모두 AP 꺼짐)을 따른다
+     */
+    static void i3(ClassLoader cl, GalReceiverService svc, Object pp) {
+        String L = "AA 준비 다시 보냄 ";
+        // #620 06:48: runningPP(신호 0) → +3.25초 순정 준비 1(신호 0, PP가 버림) → +24초 신호 1(우리 AP·DHCP)
+        i3Scene(cl, svc, pp, new Object[][] { { 0L, "pp0" }, { 3250L, "off1" }, { 24500L, "sig" } });
+        check("i3-620: AP-off ready 1 after runningPP, then the signal: ready 0 then 1 to A, '1대 (AP 꺼짐 때 받음 1)' (2.4.9: '0대 (이미 보냄 1)')",
+                sent.equals(list(A + " SER-A 0", A + " SER-A 1"))
+                        && logs.equals(list(L + "신호 기다림 25초", L + "1대 (AP 꺼짐 때 받음 1)")));
+        // #620 16:20(혼자 붙은 부팅): 순정 준비 1(신호 0)이 runningPP보다 먼저 → PP는 그 준비를 못 받음 → 준비 1만
+        i3Scene(cl, svc, pp, new Object[][] { { -430L, "off1" }, { 0L, "pp0" }, { 24500L, "sig" } });
+        check("i3-1620: stock ready 1 (signal 0) before runningPP: ready 1 only, once ('1대')",
+                sent.equals(list(A + " SER-A 1")) && logs.equals(list(L + "신호 기다림 25초", L + "1대")));
+        // 리뷰 2 꼴: 신호 1에서 runningPP → 0.3초 안에 순정 준비 1(신호 1)
+        i3Scene(cl, svc, pp, new Object[][] { { -1L, "sig" }, { 0L, "pp0" }, { 300L, "on1" } });
+        check("i3-review2: signal 1, stock ready 1 (signal 1) within 0.5 s: nothing sent, '0대 (이미 보냄 1)'",
+                sent.isEmpty() && logs.equals(list(L + "0대 (이미 보냄 1)")));
+        // 섞임 a: runningPP(신호 0) → 준비 1(신호 0) → 신호 1 → 준비 1(신호 1) → 다시 보기
+        i3Scene(cl, svc, pp, new Object[][] { { 0L, "pp0" }, { 3000L, "off1" }, { 9500L, "sig" }, { 9600L, "on1" } });
+        check("i3-mixed-a: a ready 1 with the signal on after the AP-off one (both after runningPP): '0대 (이미 보냄 1)'",
+                sent.isEmpty() && logs.equals(list(L + "신호 기다림 10초", L + "0대 (이미 보냄 1)")));
+        // 섞임 b: 준비 1(신호 0) → 준비 1(신호 1) → runningPP(신호 1): 둘 다 since 앞이라 지금도 보냄(바뀌지 않음, 1만)
+        i3Scene(cl, svc, pp, new Object[][] { { -5000L, "off1" }, { -3000L, "sig" }, { -2000L, "on1" }, { 0L, "pp0" } });
+        check("i3-mixed-b: both readies before runningPP (signal 1 at runningPP): ready 1 only, '1대' (as 2.4.9)",
+                sent.equals(list(A + " SER-A 1")) && logs.equals(list(L + "1대")));
+        // 처음 보는 폰: PC의 가짜 GPM으로는 PP 쪽을 볼 수 없다. 보내는 것은 #620 꼴과 같다(차 시험 항목)
+        i3Scene(cl, svc, pp, new Object[][] { { 0L, "pp0" }, { 3000L, "off1" }, { 20000L, "sig" } });
+        check("i3-firstphone: same sending as i3-620 (the PP side, a second init popup, is a car test)",
+                sent.equals(list(A + " SER-A 0", A + " SER-A 1")));
+        // 신호가 60초 안에 안 옴
+        i3Scene(cl, svc, pp, new Object[][] { { 0L, "pp0" }, { 3000L, "off1" } });
+        check("i3-nosig: no signal for 60 s: nothing sent, '0대 (신호 없음 60초)', nothing left scheduled",
+                sent.isEmpty() && logs.equals(list(L + "0대 (신호 없음 60초)")));
+        // 다시 보낼 때 GPM이 연결 중
+        i3Scene(cl, svc, pp, new Object[][] { { 0L, "pp0" }, { 3000L, "off1" }, { 20000L, "busy" }, { 20000L, "sig" } });
+        check("i3-busy: #620 order but GPM connecting at the resend: nothing sent, '0대 (연결 중)'",
+                sent.isEmpty() && logs.equals(list(L + "신호 기다림 21초", L + "0대 (연결 중)")));
+        // runningPP가 1초 사이 두 번
+        i3Scene(cl, svc, pp, new Object[][] { { 0L, "pp0" }, { 800L, "pp" }, { 3000L, "off1" }, { 20000L, "sig" } });
+        check("i3-twice: runningPP twice within 1 s: one 0 -> 1, not two ('1대 (AP 꺼짐 때 받음 1)' once)",
+                sent.equals(list(A + " SER-A 0", A + " SER-A 1")) && logs.size() == 2 && logs.get(1).equals(L + "1대 (AP 꺼짐 때 받음 1)"));
+        // #613 꼴: 준비 1(꺼짐) → 순정 준비 0 → 준비 1(꺼짐) → 신호: 순정 0은 표시를 지우지 않는다(0 → 1은 순정 1만보다 나쁘지 않음)
+        i3Scene(cl, svc, pp, new Object[][] { { 0L, "pp0" }, { 1000L, "off1" }, { 30760L, "stock0" }, { 31190L, "off1" }, { 40000L, "sig" } });
+        check("i3-613: AP-off 1, stock 0, AP-off 1, then the signal: ready 0 then 1, '1대 (AP 꺼짐 때 받음 1)'",
+                sent.equals(list(A + " SER-A 0", A + " SER-A 1")) && logs.get(logs.size() - 1).equals(L + "1대 (AP 꺼짐 때 받음 1)"));
+        // 0 뒤 1이 실패: 실패로 세고, 우리가 보낸 시각은 적지 않는다(다음 runningPP가 다시 보낼 수 있음)
+        clear();
+        AaReady.clearReady();
+        WirelessExplorer we = WirelessExplorer.reset();
+        we.rfcomm(A);
+        we.version(A, "SER-A", true);
+        final int[] calls = { 0 };
+        WirelessExplorer.setWirelessListener(new WirelessExplorer.WirelessListener() {
+            @Override
+            public void requestDeviceReadyStatusUpdate(WLDeviceInfo info, int ready) {
+                calls[0]++;
+                if (ready == 1) throw new IllegalStateException("dead PP");
+                sent.add(info.addr + " " + info.serial + " " + ready);
+            }
+
+            @Override
+            public void requestDeviceConnectStatusUpdate(WLDeviceInfo info, int status) {
+            }
+        });
+        AaReady.noteReady(new WLDeviceInfo(A, "SER-A"), Integer.valueOf(1), 2000L, false);
+        int n = AaReady.resend(cl, pp, LOG, 1000L, 20000L);
+        check("i3-fail1: ready 0 went out, ready 1 threw: '0대 (실패 1)', no resend time noted",
+                n == 0 && calls[0] == 2 && logs.equals(list(L + "0대 (실패 1)")) && !AaReady.resentRecently(A, 20001L));
+        listener(null);
+        // 리뷰 1 M6: 0 → 1 뒤 우리 1이 준비 시각 훅을 지나지 않아도(가짜 GalReceiverService는 noteReady를 부르지 않음),
+        // runningPP가 여러 번 와도 재알림(0 → 1)은 방아쇠당 한 번만. 다음 runningPP들은 2.4.9처럼 1만
+        clear();
+        AaReady.clearReady();
+        we = WirelessExplorer.reset();
+        listener(null);
+        we.rfcomm(A);
+        we.version(A, "SER-A", true);
+        AaReady.noteReady(new WLDeviceInfo(A, "SER-A"), Integer.valueOf(1), 2000L, false);
+        int r1 = AaReady.resend(cl, pp, LOG, 1000L, 20000L);
+        java.util.List<String> first = new ArrayList<String>(sent);
+        sent.clear();
+        int r2 = AaReady.resend(cl, pp, LOG, 1000L, 30000L);   // runningPP 다시(10초 뒤, GAP 지남), 같은 since 기준
+        java.util.List<String> second = new ArrayList<String>(sent);
+        sent.clear();
+        int r3 = AaReady.resend(cl, pp, LOG, 1000L, 40000L);
+        check("i3-repeat (review 1 M6): runningPP three times without the ready hook: 0 -> 1 only the first time, then 1 only (no second 0)",
+                r1 == 1 && first.equals(list(A + " SER-A 0", A + " SER-A 1")) && r2 == 1 && second.equals(list(A + " SER-A 1"))
+                        && r3 == 1 && !sent.contains(A + " SER-A 0") && !AaReady.readyOffSince(A, 0L));
+        check("i3-repeat: the log tail '(AP 꺼짐 때 받음 1)' appears once",
+                logs.get(0).equals(L + "1대 (AP 꺼짐 때 받음 1)") && logs.get(1).equals(L + "1대") && logs.get(2).equals(L + "1대"));
+        // 새 방아쇠(다시 AP 꺼짐 때 받은 준비 1)가 오면 그때는 다시 0 → 1
+        clear();
+        AaReady.noteReady(new WLDeviceInfo(A, "SER-A"), Integer.valueOf(1), 50000L, false);
+        AaReady.resend(cl, pp, LOG, 49000L, 60000L);
+        check("i3-repeat: a new AP-off ready (a new trigger) gets 0 -> 1 again", sent.equals(list(A + " SER-A 0", A + " SER-A 1")));
+
+        // since -1(시각 모름): 지금처럼 1만
+        clear();
+        AaReady.clearReady();
+        AaReady.noteReady(new WLDeviceInfo(A, "SER-A"), Integer.valueOf(1), 2000L, false);
+        n = AaReady.resend(cl, pp, LOG, -1L, -1L);
+        check("i3-nosince: no runningPP time (-1): ready 1 only, as 2.4.9", n == 1 && sent.equals(list(A + " SER-A 1")));
+        // 10분 지난 READY_OFF_AT은 지워짐
+        AaReady.clearReady();
+        AaReady.noteReady(new WLDeviceInfo(A, "SER-A"), Integer.valueOf(1), 1000L, false);
+        AaReady.noteReady(new WLDeviceInfo(B, "SER-B"), Integer.valueOf(1), 1000L, false);
+        int before = AaReady.mapSize();
+        AaReady.noteReady(new WLDeviceInfo(E, "SER-E"), Integer.valueOf(1), 1000L + AaReady.KEEP_MS + 1L, false);
+        check("i3-prune: AP-off times older than 10 min are dropped (2 -> 1)", before == 2 && AaReady.mapSize() == 1);
+        // 준비 훅이 없음(noteReady가 한 번도 안 불림): 지금처럼 모두 보냄(1만)
+        i3Scene(cl, svc, pp, new Object[][] { { 0L, "pp0" }, { 20000L, "sig" } });
+        check("i3-nohook: no ready notes at all: ready 1 sent (as 2.4.9), no 0", sent.equals(list(A + " SER-A 1")));
+        AaReady.clearReady();
+        I3_SIG[0] = false;
     }
     /** B-1 시험용 가짜 시계·대기열: postDelayed는 지금+ms에 걸고, runUntil은 그 시각까지 차례로 돌린다 */
     static final class Sched implements AaReady.Scheduler {

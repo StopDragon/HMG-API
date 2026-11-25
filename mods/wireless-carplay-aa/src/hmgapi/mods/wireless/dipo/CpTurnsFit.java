@@ -184,7 +184,12 @@ final class CpTurnsFit implements CpTbt {
     boolean debug;
     String diagKey, laneDiagKey;
     int diagLogs;
-    static final int DIAG_LOGS_MAX = 300;
+    /*
+     * 2.4.10(1.8.1 I-6): 300 → 1200. 진단 줄은 한 줄 약 220바이트(차 로그 5개 평균 216~224)라 1200줄이면 약 264KB로, 디버그 기록 상한
+     * 12MB의 2%쯤이다. 줄이 가장 빨리 쌓인 차 로그(11-09 니로, 4분에 82줄 = 분당 약 20줄)로도 약 1시간을 담는다(전에는 약 15분).
+     * 1.8.1 계획의 #306 "25분에 다 참"(분당 12줄)이면 약 100분이다
+     */
+    static final int DIAG_LOGS_MAX = 1200;
     /** 마지막 near() 판정의 이유(진단 줄용): in-d(D 안, 곧 회전), hold(D와 D + NEAR_EXIT_MARGIN 사이에서 곧 회전 유지, 1.7.3), no-dist, stale-dist(새 회전인데 이번 갱신에 거리 없음), put-off(새 회전의 거리를 앞 회전의 값으로 보고 미룸, 2.4.4 후보), jump-hold(같은 회전에서 거리가 뛰어 한 번 붙잡음, 2.4.4 후보), type(큰 그림 없는 종류), far */
     String nearWhy = "";
     /** 마지막 near() 판정에 쓴 D(m, 진단 줄용). D를 정하기 전에 판정이 끝났으면 -1 */
@@ -287,6 +292,27 @@ final class CpTurnsFit implements CpTbt {
     static final int D_GENERAL = 350, D_EXPRESSWAY = 1050;
     /** 곧 회전 표시 번호(순정 SetCase*): 회전 지점 13, 유턴 31, 고속도로 오른쪽·왼쪽 출구 17·18. 갈림도 13(1.8.0, 전에는 Y자 25) */
     static final int NEAR_TURN = 13, NEAR_UTURN = 31, NEAR_EXIT_RIGHT = 17, NEAR_EXIT_LEFT = 18;
+    /**
+     * 2.4.10(1.8.1 L-1): 회전교차로 곧 회전 32(EXIT_ROUNDABOUT_TRS_R, 오른쪽 통행). 순정 니로 PHEV 운행 2026-11-25 07:40:21에서
+     * 회전교차로 앞 90m부터 "32, 방향 315도, 옆길 8208(비트 4·13), 막대 20 → 10"을 봤다(표본 1개). 33(왼쪽 통행)은 못 봐서 쓰지 않는다
+     */
+    static final int NEAR_ROUNDABOUT_R = 32;
+    /**
+     * 2.4.10(1.8.1 T1-1): 고가·지하차도 곧 회전. 순정 운행(니로 11-17·11-20, 니로 PHEV·K7 11-25)에서 지하차도는 4번 모두 46(방향 90도 3번,
+     * 270도 1번, 옆길 0), 고가는 왼쪽(270도)에서만 44 두 번(옆길 0)을 봤다. 오른쪽 고가 번호는 못 봐서 넣지 않는다(소유자 결정 Y-8)
+     */
+    static final int NEAR_OVERPASS_L = 44, NEAR_UNDERPASS = 46;
+    /** 지하차도·고가로 보는 낱말(폰 안내 문구·도로 이름에 들어 있을 때) */
+    static final String[] UNDERPASS_WORDS = { "지하차도", "지하도로" }, OVERPASS_WORDS = { "고가차도", "고가도로" };
+    /**
+     * 그 시설로 들어가지 않는 뜻일 수 있는 낱말: 안내 문구·도로 이름 어디에든 하나라도 있으면 바꾸지 않는다(소유자 결정 11-23 "부정·옆길
+     * 낱말이 있으면 바꾸지 않음"). "방면"(그쪽으로 가는 길)과 교차로 이름 꼴(사거리·교차로·입구·앞 등, 시설 이름을 딴 교차로)은 그 시설로
+     * 바로 들어가는지 알 수 없어 넣었다. 폰이 실제로 보낸 이름은 "해찬나래지하차도 방면"(11-05 카플레이)뿐이라, 이 규칙이면 그 표본은
+     * 바뀌지 않는다. 소유자 결정(2026-11-25): 지금대로 "들어가는 길 이름일 때만" 바꾸고, 지하차도 길에서 폰이 보낸 이름과 실제 진입 여부를
+     * 차에서 본 뒤 다시 정한다(1.8.1-work/mode.md 5장)
+     */
+    static final String[] FACILITY_NOT_WORDS = { "옆길", "측도", "아래", "밑", "하부", "진입하지", "하지 마", "금지", "지나", "나와", "통과 후", "방면",
+            "사거리", "삼거리", "오거리", "교차로", "입구", "앞" };
 
     long now() {
         return clock >= 0L ? clock : android.os.SystemClock.elapsedRealtime();
@@ -913,7 +939,7 @@ final class CpTurnsFit implements CpTbt {
             icon = fallbackIcon(x.type, x.side, x.junction, x.exit);
             how = icon == NO_ICON ? "blank" : x.exit != 0 ? "angle" : "type";
         }
-        logManeuver(x, u.state, icon, how);
+        logManeuver(x, u.state, icon, how, CpTurns.distStrState(u.nextStr), u.nextUnits);
         boolean was = activeId != null;
         activeId = id;
         lastSendAt = t;
@@ -1124,11 +1150,16 @@ final class CpTurnsFit implements CpTbt {
         }
         nearWhy = remain > d ? "hold" : "in-d";
         u.nearOn = true;
+        // 2.4.10(1.8.1 T1-1): 고가·지하차도 낱말이 있으면 순정 번호(44·46), 옆길 0, 방향 90/270도. 다른 길 비트는 넣지 않는다(순정 옆길 0)
+        int[] f = facilityNear(x.type, x.description, x.afterRoad, disp);
+        if (f != null) return new int[] { f[0], 0, f[1], bar(remain, d), d };
         int bits = disp[1] < 0 ? 0 : sideBits(x.angles, disp[1]);
         // 1.8.0(2.4.7): 갈림의 다른 길 비트는 순정과 같게 넣는다. 폰이 다른 길 각도를 주지 않아도 넣는다.
         // 오른쪽 갈림(14)은 직진 비트 0(순정 side 3 = 비트 0·1), 왼쪽 갈림(13)은 오른쪽 22.5도 비트 1(순정 side 16386 = 비트 1·14,
         // 직진 비트 없음). 근거: 니로 순정 운행 2026-11-17·11-20, 왼쪽 갈림 세 번 모두 16386
         if (fork(x.type)) bits |= forkOtherBit(x.type == 13);
+        // 2.4.10(1.8.1 L-2): 각도 없는 진입 램프는 오른쪽 갈림 모양(순정 side 3 = 직진 비트 0 + 22.5도 비트 1). 왼쪽 통행의 거울(0 + 14)도 직진 비트
+        if (onRampDefault(x.type, x.exit)) bits |= 1;
         return new int[] { disp[0], bits, disp[2], bar(remain, d), d };
     }
 
@@ -1187,9 +1218,10 @@ final class CpTurnsFit implements CpTbt {
 
     /**
      * 곧 회전 {표시 번호, 나가는 길 옆길 비트 번호(-1: 옆길 없음), 방향 칸} 또는 곧 회전 화면이 없는 종류면 null.
-     * 순정 SetCase*: 고속도로 출구 17/18(방향 12·36), 유턴 31(오른쪽 통행 36, 왼쪽 통행 12), 회전교차로는 출구
-     * 아이콘 그대로, 그 밖의 회전 지점과 갈림 13(1.8.0, 전에는 갈림을 Y자 25로 보냄). 방향은 나가는 길 칸(각도가 없으면 종류의 기본 방향). 고가·지하차도(43~46)·
-     * 터널·톨은 iAP2에 해당 종류가 없다. "바로 다음 안내와 겹침"(19/20)은 폰 정보로 정할 수 없어 쓰지 않는다.
+     * 순정 SetCase*: 고속도로 출구 17/18(방향 12·36), 유턴 31(오른쪽 통행 36, 왼쪽 통행 12), 회전교차로는 오른쪽 통행·출구 각도가 있으면
+     * 32(2.4.10 L-1), 그 밖은 출구 아이콘 그대로, 그 밖의 회전 지점과 갈림 13(1.8.0, 전에는 갈림을 Y자 25로 보냄), 각도 없는 진입 램프 13 + 22.5도
+     * (2.4.10 L-2). 방향은 나가는 길 칸(각도가 없으면 종류의 기본 방향). 고가·지하차도(44·46)는 iAP2에 종류가 없어 near()가 글자로 바꾼다
+     * (2.4.10 T1-1, facilityNear). 터널·톨은 쓰지 않는다. "바로 다음 안내와 겹침"(19/20)은 폰 정보로 정할 수 없어 쓰지 않는다.
      */
     static int[] nearDisplay(int type, int side, int junction, int exit, int icon) {
         switch (type) {
@@ -1214,11 +1246,22 @@ final class CpTurnsFit implements CpTbt {
                 int b = exit != 0 ? streetBit(exit) : -1;
                 return b >= 1 && b <= 3 ? new int[] { NEAR_TURN, b, exitSlot(exit) } : new int[] { NEAR_TURN, 1, 3 };
             }
+            // 2.4.10(1.8.1 L-2, 소유자 결정 Y-9 2026-11-25: 표본이 1개인 것을 알고 넣음, 차 확인 필수): 각도를 주지 않는 진입 램프(애플 지도·
+            // 네이버 지도)는 직진(0도) 대신 순정 오른쪽 진입 모양: 13, 22.5도(칸 3), 옆길 3(비트 0·1, 직진 비트는 near()가 더함).
+            // 근거: K7 순정 운행 2026-11-25 16:29:00 한 번(오른쪽 진입). iAP2의 side는 통행 방향이지 램프가 어느 쪽인지가 아니다. 그래서
+            // 오른쪽 통행인 한국에서는 왼쪽 램프도 이 모양이 된다(폰이 왼쪽·오른쪽을 주지 않아 가를 수 없음, 리뷰 1 M4). 왼쪽 통행(side 1)은
+            // 그 거울(337.5도, 비트 0·14)로 두었다. 순정 왼쪽 진입(162 뒤 곧 회전)은 못 봤다. 각도를 주면 지금처럼 그 각도
+            case 9:
+                if (exit == 0) return side == 1 ? new int[] { NEAR_TURN, 14, 45 } : new int[] { NEAR_TURN, 1, 3 };
+                break;
             default: break;
         }
         if (junction == 1 || type == 6 || type == 7 || type == 19 || (type >= 28 && type <= 46)) {
             // 회전교차로: 출구 아이콘 그대로 + 막대, 방향은 출구 칸
             if (icon == NO_ICON || icon <= 0) return null;
+            // 2.4.10(1.8.1 L-1): 오른쪽 통행(side 0)이고 출구 각도를 알면 순정처럼 32 + 출구 칸. 옆길은 near()가 출구 비트와 폰이 준 다른 길
+            // 각도로 채운다(순정 8208의 비트 4가 다른 길인지는 표본 1개라 모름). 들어가기(6)는 출구를 모르므로, 각도가 없으면 지금처럼 출구 아이콘
+            if (side == 0 && exit != 0 && type != 6) return new int[] { NEAR_ROUNDABOUT_R, exitBit(exit), exitSlot(exit) };
             return new int[] { icon, exitBit(exit), exitSlot(exit) };
         }
         int dir;
@@ -1234,6 +1277,46 @@ final class CpTurnsFit implements CpTbt {
         }
         // 2.4.4 후보(나): 종류의 기본 방향도 각도로 옆길 비트를 구한다(왼쪽 36 = 270도 = 비트 11, 칸÷3이 아님)
         return exit != 0 ? new int[] { NEAR_TURN, exitBit(exit), exitSlot(exit) } : new int[] { NEAR_TURN, streetBit((int) (dir * 7.5f)), dir };
+    }
+
+    /** 2.4.10(1.8.1 L-2): 각도 없는 진입 램프(nearDisplay case 9의 기본 모양)인지 */
+    static boolean onRampDefault(int type, int exit) {
+        return type == 9 && exit == 0;
+    }
+
+    /**
+     * 2.4.10(1.8.1 T1-1): 고가·지하차도 곧 회전 {표시 번호, 방향 칸} 또는 바꾸지 않으면 null. 폰 안내 문구(item 2)나 도로 이름(item 4)
+     * 가운데 하나에 시설 낱말이 있고 두 글 어디에도 FACILITY_NOT_WORDS가 없어야 한다. 두 시설 낱말이 함께 있으면 바꾸지 않는다.
+     * 대상은 곧 회전 그림이 13이고 왼쪽·오른쪽이 갈리는 회전(좌·우회전, 약간 좌·우, 갈림, 길 끝 좌·우)뿐이다. 직진·급회전·유턴·출구·
+     * 회전교차로는 순정 값을 못 봐서 그대로 둔다. 지하차도 46(왼쪽 270도 칸 36, 오른쪽 90도 칸 12), 고가는 왼쪽일 때만 44(칸 36)
+     */
+    static int[] facilityNear(int type, String description, String afterRoad, int[] disp) {
+        if (disp == null || disp[0] != NEAR_TURN) return null;
+        switch (type) {
+            case 1: case 2: case 13: case 14: case 20: case 21: case 49: case 50: break;
+            default: return null;
+        }
+        int slot = disp[2];
+        boolean left = slot > 24 && slot < 48, right = slot > 0 && slot < 24;
+        if (!left && !right) return null;
+        // 안내 문구와 도로 이름을 한 글로 본다: 부정·옆길 낱말이 어느 쪽에 있든 바꾸지 않는다(리뷰: 문구 "측도 이용" + 이름 "OO지하차도")
+        String text = (description == null ? "" : description) + " " + (afterRoad == null ? "" : afterRoad);
+        int under = facilityWord(text, UNDERPASS_WORDS), over = facilityWord(text, OVERPASS_WORDS);
+        // 1: 낱말 있음, 2: 낱말은 있으나 부정·옆길 낱말도 있음
+        if ((under | over) >= 2 || (under != 0 && over != 0)) return null;
+        if (under == 1) return new int[] { NEAR_UNDERPASS, left ? 36 : 12 };
+        if (over == 1 && left) return new int[] { NEAR_OVERPASS_L, 36 };
+        return null;
+    }
+
+    /** 글 s에 words 가운데 하나가 있으면 1, 그런데 FACILITY_NOT_WORDS도 있으면 2, 없으면 0 */
+    static int facilityWord(String s, String[] words) {
+        if (s == null || s.length() == 0) return 0;
+        boolean hit = false;
+        for (String w : words) if (s.indexOf(w) >= 0) hit = true;
+        if (!hit) return 0;
+        for (String n : FACILITY_NOT_WORDS) if (s.indexOf(n) >= 0) return 2;
+        return 1;
     }
 
     /** 나가는 길의 옆길 비트 번호: 보통 streetBit, 뒤쪽이면 179도 이하 7, 그 밖 8(순정 SetSideStreetBit) */
@@ -1448,15 +1531,22 @@ final class CpTurnsFit implements CpTbt {
         return a <= 67 ? 107 : a <= 112 ? 105 : 104;
     }
 
-    /** the maneuver's values (numbers only: no road or instruction text) when they change, up to MANEUVER_LOGS_MAX lines */
-    void logManeuver(Maneuver x, int state, int icon, String how) {
-        String k = x.type + " " + x.side + " " + x.junction + " " + x.exit + " " + state + " " + icon;
+    /**
+     * the maneuver's values (numbers only: no road or instruction text) when they change, up to MANEUVER_LOGS_MAX lines.
+     * 2.4.10(1.8.1 T1-4, K-7·#261): 끝에 "dist str N units U"를 붙인다. N은 폰이 준 표시 거리 문자열(RouteGuidanceUpdate item 11)이
+     * 0 없음(빈 값), 1 숫자, 2 숫자 아님이고 U는 그 단위(item 12, 폰 값 그대로)다. 문자열 자체는 남기지 않는다.
+     * 같은 줄 거르기 열쇠에는 N만 넣는다. 단위는 다가가며 km → m로 바뀌어 회전마다 줄이 하나씩 늘므로(300줄 한도를 나눠 씀) 넣지 않고,
+     * 줄이 남을 때의 값만 적는다(거리 값도 넣지 않음)
+     */
+    void logManeuver(Maneuver x, int state, int icon, String how, int distStr, int distUnits) {
+        String k = x.type + " " + x.side + " " + x.junction + " " + x.exit + " " + state + " " + icon + " " + distStr;
         if (k.equals(maneuverKey) || maneuverLogs >= MANEUVER_LOGS_MAX) return;
         maneuverKey = k;
         maneuverLogs++;
         Dipo.log("CarPlay: maneuver type " + x.type + " side " + x.side + " junction " + x.junction + " exit " + x.exit
-                + " state " + state + " -> icon " + icon + " (" + how + ")");
+                + " state " + state + " -> icon " + icon + " (" + how + ") dist str " + distStr + " units " + distUnits);
     }
+
 
 
     /**

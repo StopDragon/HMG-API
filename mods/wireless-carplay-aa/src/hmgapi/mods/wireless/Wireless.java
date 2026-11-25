@@ -19,6 +19,9 @@ package hmgapi.mods.wireless;
 //   보정 층(AaTurnsFit·CpTurnsFit, TrapBar)을 쓰고 aa_name_hold를 되살렸다. tbt_fit을 끄면 2.4.2와 같다(AaTurns·CpTurns, 막대 없음).
 // Korea Projection 1.7.4(2026-11-16, 모드 2.4.5): 순정 무선 앱(PhoneProjection)의 별표 키 안내 팝업(GLOBAL_POPUP)을 순정 무선
 //   등록 기기가 없을 때 건너뛴다(PopupSkip, 설정 star_popup_skip 기본 켬). 니로에서 이 팝업이 카플레이 화면을 덮은 뒤 화면·키가 묶였다.
+// Korea Projection 1.8.1(2026-11-25, 모드 2.4.10 후보): I-3 준비 시각 훅에 그때의 신호를 넘긴다(AaReady: AP 꺼짐 때 받은 준비는
+//   "이미 보냄"으로 세지 않고 0 → 1로 다시 보냄). 디버그일 때만 AA 거리 진단 줄(AaTurnsFit.diag). AP 물음에 답한 값 기록(AaWifi, M-2)은
+//   디버그와 상관없이 프로세스마다 40줄까지.
 
 import android.content.ComponentName;
 import android.content.Context;
@@ -84,6 +87,8 @@ public final class Wireless extends ModEntry {
     static volatile boolean debug;
     /** Android Auto turn log lines so far in this process (AaTurns.TURN_LOGS_MAX in all) */
     static final java.util.concurrent.atomic.AtomicInteger aaTurnLogs = new java.util.concurrent.atomic.AtomicInteger();
+    /** 2.4.10(1.8.1 I-4 준비): AA 거리 진단 줄 수(디버그일 때만, 회전 줄과 따로, 프로세스당 AaTurnsFit.DIAG_LOGS_MAX) */
+    static final java.util.concurrent.atomic.AtomicInteger aaDiagLogs = new java.util.concurrent.atomic.AtomicInteger();
 
     @Override
     public void zygoteInit(ModContext mod) {
@@ -411,6 +416,15 @@ public final class Wireless extends ModEntry {
                                         }
                                     };
                                     t = AaTurnsFit.make(fit, nameHold, app.context, c, handler, sink);
+                                    // 2.4.10(I-4 준비): 디버그 로그가 켜졌으면 보정 층에 거리 진단 줄을 남길 곳을 준다(회전 줄 한도와 따로)
+                                    if (debug && t instanceof AaTurnsFit) {
+                                        ((AaTurnsFit) t).diag = new AaTurns.Sink() {
+                                            @Override
+                                            public void line(String s) {
+                                                if (aaDiagLogs.incrementAndGet() <= AaTurnsFit.DIAG_LOGS_MAX) mod.log(s);
+                                            }
+                                        };
+                                    }
                                     turns.put(receiver, t);
                                     mod.log("Android Auto: turn-by-turn to the cluster for this connection");
                                 }
@@ -590,7 +604,8 @@ public final class Wireless extends ModEntry {
             Hooks.findAndHookMethod(gal, "requestWLDeviceReadyStatusUpdate", "android.phoneprojection.WLDeviceInfo", int.class, new MethodHook() {
                 @Override
                 protected void beforeHookedMethod(Param p) {
-                    AaReady.noteReady(p.args[0], p.args[1], android.os.SystemClock.elapsedRealtime());
+                    // 2.4.10(I-3): 그때의 신호도 넘긴다. 신호 0에서 온 준비(1)는 PP가 버렸으므로 "이미 보냄"으로 세지 않는다
+                    AaReady.noteReady(p.args[0], p.args[1], android.os.SystemClock.elapsedRealtime(), AaWifi.on(mod));
                 }
             });
         } catch (Throwable t) {

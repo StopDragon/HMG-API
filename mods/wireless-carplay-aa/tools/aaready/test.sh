@@ -4,5 +4,5 @@
 set -e
 cd "$(dirname "$0")"
 CP=$(mktemp -d); trap 'rm -rf "$CP"' EXIT
-javac --release 8 -Xlint:-options -nowarn -encoding UTF-8 -d "$CP" $(find stubs test -name '*.java') ../../src/hmgapi/mods/wireless/AaReady.java
+javac --release 8 -Xlint:-options -nowarn -encoding UTF-8 -d "$CP" $(find stubs test -name '*.java') ../../src/hmgapi/mods/wireless/AaReady.java ../../src/hmgapi/mods/wireless/ApAnswerLog.java
 java -Dfile.encoding=UTF-8 -cp "$CP" hmgapi.mods.wireless.AaReadyTest

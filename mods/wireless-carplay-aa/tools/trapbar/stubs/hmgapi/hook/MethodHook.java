@@ -29,6 +29,11 @@ public abstract class MethodHook {
         }
 
         public boolean returnEarly() { return returnEarly; }
+
+        /** 진짜 HMG-API Param처럼(모드 2.4.10 AaWifi의 뒤 훅이 씀). 가짜는 예외를 받지 않는다 */
+        public Throwable getThrowable() { return null; }
+
+        public boolean hasThrowable() { return false; }
     }
 
     /** 시험용: 훅을 부른다(protected를 같은 패키지에서 부를 수 있게) */

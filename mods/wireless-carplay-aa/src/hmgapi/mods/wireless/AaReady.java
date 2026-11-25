@@ -33,6 +33,17 @@ import java.util.Map;
  *  - 훅을 걸지(설정), 언제 부를지(신호, 0.5초 뒤 한 번)를 install·onRunningPP로 떼어 PC에서 시험한다.
  *  - 6단계 리뷰 L5: runningPP가 짧게 두 번 오면 준비(1)도 두 번 나갔다. 우리가 다시 보낸 시각을 기기별로 적어
  *    RESEND_GAP_MS 안에는 같은 기기에 다시 보내지 않는다(로그 "(방금 보냄 k)").
+ *
+ * 2.4.10(1.8.1 I-3, #620·#518, 설계 drafts/1.8.1-work/design-i1-i3.md 2장): AA가 우리 AP보다 먼저 물은 부팅.
+ *  - 순정 준비(1)가 신호 0(우리 AP 꺼짐)일 때 PP에 가면 PP는 "AP 모드 모름"으로 버린다. 그것을 "이미 보냄"으로 세어 0대가 됐다.
+ *    그래서 신호 0일 때 온 준비(1)는 READY_AT이 아니라 READY_OFF_AT에 적는다(noteReady의 apOn). readySince 조건(리뷰 2)은 그대로다.
+ *  - 그런 기기에는 준비(1)만이 아니라 **준비(0) → 준비(1)**를 잇달아 보낸다. 순정 PP(PhoneProjection a.smali
+ *    requestWLDeviceReadyStatusUpdate, 2026-11-25 읽음)는 "BT 자동 연결 대상(lD)이 있고, 받은 값이 1이고, 이 기기에 저장된 준비가
+ *    이미 1"이면 mReadyTrueUpdate를 거짓으로 두어 CONNECTIVITY 갈래(우리 AP가 답하는 갈래)에서 연결하지 않는다. 버린 준비(1)도
+ *    저장값을 1로 남기므로 준비(1)만 다시 보내면 막힐 수 있다. 준비(0)는 저장값을 0으로 바꾸고 lD가 이 기기면 비운다. 이 순서는 순정이
+ *    SPP를 다시 걸 때 보내는 것과 같다(#613 15:04:33, #620 06:49:48에서 그 뒤 연결됨).
+ *  - 신호 1에서 온 준비가 있는 기기, AP 꺼짐 준비가 없는 기기(16:20 꼴: PP가 그 준비를 못 받음)는 지금처럼 준비(1)만 보낸다.
+ *  - 한도: runningPP마다 resend 한 번, 같은 기기 RESEND_GAP_MS, B-1 60초 한도는 그대로. 맵은 KEEP_MS로 지운다.
  */
 final class AaReady {
     private AaReady() {}
@@ -175,21 +186,47 @@ final class AaReady {
         }
     }
 
-    /** 기기 주소 → 순정이 마지막으로 준비(1)를 보낸 시각(ms). 메모리에만 있고 로그·파일에 쓰지 않는다 */
+    /** 기기 주소 → 순정이 마지막으로 준비(1)를 보낸 시각(ms, 신호 1일 때). 메모리에만 있고 로그·파일에 쓰지 않는다 */
     private static final Map<String, Long> READY_AT = new java.util.HashMap<String, Long>();
+    /** 2.4.10(I-3): 기기 주소 → 신호 0(우리 AP 꺼짐)일 때 순정이 준비(1)를 보낸 마지막 시각(ms). PP는 그 준비를 AP 모름으로 버렸다 */
+    private static final Map<String, Long> READY_OFF_AT = new java.util.HashMap<String, Long>();
 
-    /** GalReceiverService.requestWLDeviceReadyStatusUpdate(info, ready) 앞에서 부른다. 준비(1)만 적는다 */
+    /** 2.4.10 전과 같은 꼴(신호를 모름 = 켜짐으로 봄). 시험과 옛 부르기용 */
     static void noteReady(Object info, Object ready, long now) {
+        noteReady(info, ready, now, true);
+    }
+
+    /**
+     * GalReceiverService.requestWLDeviceReadyStatusUpdate(info, ready) 앞에서 부른다. 준비(1)만 적는다.
+     * apOn: 그때의 패키지 신호(AaWifi.on). 거짓이면 READY_OFF_AT에 적는다(I-3: PP가 AP 모름으로 버린 준비)
+     */
+    static void noteReady(Object info, Object ready, long now, boolean apOn) {
         if (info == null || !Integer.valueOf(1).equals(ready)) return;
         try {
             Object a = info.getClass().getMethod("getWLDevBtAddr").invoke(info);
             if (a == null) return;
-            synchronized (READY_AT) {
-                prune(READY_AT, now);
-                READY_AT.put(a.toString(), Long.valueOf(now));
+            Map<String, Long> m = apOn ? READY_AT : READY_OFF_AT;
+            synchronized (m) {
+                prune(m, now);
+                m.put(a.toString(), Long.valueOf(now));
             }
         } catch (Throwable t) {
             // 적지 못하면 전처럼(그 기기도 다시 보냄)
+        }
+    }
+
+    /** 리뷰 1 M6: 0 → 1을 보낸 기기의 AP 꺼짐 표시를 지운다(같은 방아쇠로 두 번 보내지 않게) */
+    static void clearReadyOff(Object addr) {
+        synchronized (READY_OFF_AT) {
+            READY_OFF_AT.remove(String.valueOf(addr));
+        }
+    }
+
+    /** 2.4.10(I-3): since(ms) 뒤에 순정이 신호 0일 때 이 주소로 준비(1)를 보냈다(PP가 버림) */
+    static boolean readyOffSince(Object addr, long since) {
+        synchronized (READY_OFF_AT) {
+            Long t = READY_OFF_AT.get(String.valueOf(addr));
+            return t != null && t.longValue() >= since;
         }
     }
 
@@ -206,6 +243,9 @@ final class AaReady {
         synchronized (READY_AT) {
             READY_AT.clear();
         }
+        synchronized (READY_OFF_AT) {
+            READY_OFF_AT.clear();
+        }
         synchronized (RESENT_AT) {
             RESENT_AT.clear();
         }
@@ -221,11 +261,13 @@ final class AaReady {
         }
     }
 
-    /** 시험용: 두 맵의 크기 */
+    /** 시험용: 세 맵의 크기 */
     static int mapSize() {
         synchronized (READY_AT) {
-            synchronized (RESENT_AT) {
-                return READY_AT.size() + RESENT_AT.size();
+            synchronized (READY_OFF_AT) {
+                synchronized (RESENT_AT) {
+                    return READY_AT.size() + READY_OFF_AT.size() + RESENT_AT.size();
+                }
             }
         }
     }
@@ -287,7 +329,7 @@ final class AaReady {
             devices = snapshot(al);
             for (Object[] e : devices) e[2] = Boolean.valueOf(e[0] != null && wl.containsKey(e[0]));
         }
-        int sent = 0, failed = 0, already = 0, recent = 0;
+        int sent = 0, failed = 0, already = 0, recent = 0, apOff = 0;
         for (Object[] e : devices) {
             try {
                 Object addr = e[0], di = e[1];
@@ -307,8 +349,19 @@ final class AaReady {
                 }
                 Object info = getInfo.invoke(we, dev);
                 if (info == null) continue;
+                // 2.4.10(I-3): PP가 신호 0에서 받은 준비(1)를 버렸으면 순정 SPP 다시 걸기와 같은 순서로 0 → 1(클래스 설명).
+                // 같은 스레드에서 잇달아 부른다. 0 뒤 1이 실패하면 실패로 센다(PP는 순정 SPP 끊김 뒤와 같은 상태로 남음)
+                boolean off = since >= 0 && readyOffSince(addr, since);
+                if (off) ready.invoke(listener, info, Integer.valueOf(0));
                 ready.invoke(listener, info, Integer.valueOf(1));
                 sent++;
+                if (off) {
+                    apOff++;
+                    // 리뷰 1 M6: 이 방아쇠(AP 꺼짐 때 받은 준비)에는 0 → 1을 한 번만. 우리 1이 준비 시각 훅(noteReady)을 지나 READY_AT에
+                    // 적힌다는 데 기대지 않고 여기서 표시를 지운다. 그러지 않으면 다음 runningPP마다(RESEND_GAP_MS 뒤) 0을 또 보내
+                    // PP의 BT 자동 연결 대상(lD)을 되풀이해 지울 수 있다. 다음 runningPP는 2.4.9처럼 1만(또는 "이미 보냄") 다룬다
+                    clearReadyOff(addr);
+                }
                 if (now >= 0) {
                     synchronized (RESENT_AT) {
                         prune(RESENT_AT, now);
@@ -320,7 +373,7 @@ final class AaReady {
             }
         }
         log.line(LINE + sent + "대" + (already > 0 ? " (이미 보냄 " + already + ")" : "") + (recent > 0 ? " (방금 보냄 " + recent + ")" : "")
-                + (failed > 0 ? " (실패 " + failed + ")" : ""));
+                + (apOff > 0 ? " (AP 꺼짐 때 받음 " + apOff + ")" : "") + (failed > 0 ? " (실패 " + failed + ")" : ""));
         return sent;
     }
 

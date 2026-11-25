@@ -696,7 +696,7 @@ final class CpTurns implements CpTbt {
         int icon = exactIcon(x.type, x.side, x.junction, x.exit, u.state);
         // HUD 거리: 모르는 거리면 0 대신 첫 칸을 비운다(#123, 소유자 결정 2로 HUD는 계속 전달)
         boolean hudDistKnown = distKnown && dist >= 0f;
-        logManeuver(x, u.state, icon, icon != 0 ? "stock" : "not in the stock table, not sent");
+        logManeuver(x, u.state, icon, icon != 0 ? "stock" : "not in the stock table, not sent", distStrState(u.nextStr), u.nextUnits);
         boolean was = activeId != null;
         activeId = id;
         lastSendAt = t;
@@ -729,13 +729,25 @@ final class CpTurns implements CpTbt {
     static final int NO_ICON = 8;
 
     /** the maneuver's values (numbers only: no road or instruction text) when they change, up to MANEUVER_LOGS_MAX lines */
-    void logManeuver(Maneuver x, int state, int icon, String how) {
-        String k = x.type + " " + x.side + " " + x.junction + " " + x.exit + " " + state + " " + icon;
+    void logManeuver(Maneuver x, int state, int icon, String how, int distStr, int distUnits) {
+        // 2.4.10(1.8.1 T1-4): 표시 거리 문자열 유무·단위(CpTurnsFit.logManeuver와 같은 꼴, 문자열 자체는 남기지 않음). 열쇠에는 유무만
+        String k = x.type + " " + x.side + " " + x.junction + " " + x.exit + " " + state + " " + icon + " " + distStr;
         if (k.equals(maneuverKey) || maneuverLogs >= MANEUVER_LOGS_MAX) return;
         maneuverKey = k;
         maneuverLogs++;
         Dipo.log("CarPlay: maneuver type " + x.type + " side " + x.side + " junction " + x.junction + " exit " + x.exit
-                + " state " + state + " -> icon " + icon + " (" + how + ")");
+                + " state " + state + " -> icon " + icon + " (" + how + ") dist str " + distStr + " units " + distUnits);
+    }
+
+    /** 2.4.10(1.8.1 T1-4): 표시 거리 문자열의 상태(로그용, CpTurnsFit도 씀): 0 없음·빈 값, 1 숫자(0 이상), 2 숫자 아님 */
+    static int distStrState(String s) {
+        if (s == null || s.length() == 0) return 0;
+        try {
+            float f = Float.parseFloat(s);
+            return Float.isNaN(f) || Float.isInfinite(f) || f < 0f ? 2 : 1;
+        } catch (NumberFormatException e) {
+            return 2;
+        }
     }
 
     /**

@@ -1392,6 +1392,147 @@ public final class CpTurnsTest {
         return r;
     }
 
+    /** 곧 회전 하나(안내 문구 item 2를 더함): nearManeuver + description */
+    static Iap2NotiMsg nearManeuverDesc(int type, int exit, String desc, String after) {
+        Iap2NotiMsg m = nearManeuver(0, type, 0, 0, exit, null, -1, after);
+        if (desc != null) m.getItemGroup().add(2, STR, s(desc));
+        return m;
+    }
+
+    /** 새 길안내 하나를 meters에서 받고 마지막 tbt 줄 */
+    static String nearTbt(Iap2NotiMsg man, int meters, long clock) {
+        c = new Cluster();
+        CpTurnsFit t = new CpTurnsFit(new android.content.Context(), c, null);
+        t.clock = clock;
+        t.maneuver(man);
+        t.routeGuidance(rgAt(1, meters));
+        return last("tbt ");
+    }
+
+    /**
+     * 2.4.10(1.8.1): T1-1 고가·지하차도, L-1 회전교차로 32, L-2 각도 없는 진입 램프, L-3 목적지 접근, T1-4 거리 문자열 로그, I-6 진단 줄 한도.
+     * 순정 값: 1.8.1-work/tbtlog-1125.md 2장. 폰 문구는 실제 표본이 없어 만든 것이다(도로 이름 꼴 "반포지하차도"·"OO지하차도 방면"은
+     * 11-20·11-05 기록의 교차로 이름에서 봄)
+     */
+    static void mode181() {
+        Car.unit = Car.DISTANCE_KM;
+        long ck = 41000000L;
+        // T1-1 지하차도 46: 오른쪽 90도, 왼쪽 270도, 옆길 0
+        String[][] tc = {
+            // 종류, 각도, 안내 문구, 도로 이름, 바라는 tbt 앞부분, 까닭
+            { "2", "90", null, "반포지하차도", "tbt 46 0 90.0 300.0 ", "underpass in the road name, right turn: 46, side 0, 90" },
+            { "1", "-90", null, "반포지하차도", "tbt 46 0 270.0 300.0 ", "underpass, left turn: 46, side 0, 270" },
+            { "14", "0", "지하차도 진입", "Some Rd", "tbt 46 0 90.0 300.0 ", "underpass in the instruction, keep right (no angle): 46 at 90, no fork bit" },
+            { "13", "0", null, "OO지하도로", "tbt 46 0 270.0 300.0 ", "지하도로, keep left: 46 at 270, no fork bits" },
+            { "50", "0", null, "OO지하차도", "tbt 46 0 90.0 300.0 ", "slight right: 46 at 90" },
+            { "1", "-90", null, "OO고가차도", "tbt 44 0 270.0 300.0 ", "overpass, left: 44, side 0, 270" },
+            { "13", "0", "고가도로 진입", "Some Rd", "tbt 44 0 270.0 300.0 ", "고가도로 in the instruction, keep left: 44" },
+            { "2", "90", null, "OO고가차도", "tbt 13 ", "overpass on the right: unchanged (owner Y-8, right overpass never seen)" },
+            { "2", "90", null, "OO지하차도 방면", "tbt 13 ", "방면 (toward): unchanged" },
+            { "2", "90", "지하차도 옆길로", "Some Rd", "tbt 13 ", "옆길: unchanged" },
+            { "1", "-90", "고가차도 아래로", "Some Rd", "tbt 13 ", "아래: unchanged" },
+            { "2", "90", "지하차도 진입하지 마세요", "Some Rd", "tbt 13 ", "진입하지 마세요: unchanged" },
+            { "2", "90", "측도 이용", "OO지하차도", "tbt 13 ", "a not-word in the instruction, the facility in the road name: unchanged (both texts count)" },
+            { "2", "90", null, "OO고가차도사거리", "tbt 13 ", "an intersection named after an overpass (사거리): unchanged" },
+            { "1", "-90", null, "OO지하차도 앞", "tbt 13 ", "앞 (in front of): unchanged" },
+            { "2", "90", null, "해찬나래지하차도 방면", "tbt 13 ", "the one real phone sample (11-05 CarPlay, 방면): unchanged until the owner decides" },
+            { "2", "90", "지하차도 옆길", "OO지하차도", "tbt 13 ", "one text with a not-word: unchanged even if the other text is plain" },
+            { "2", "90", null, "OO지하차도 고가차도", "tbt 13 ", "both facilities: unchanged" },
+            { "3", "0", null, "OO지하차도", "tbt 13 1 0.0 300.0 ", "straight (no left/right): unchanged (13, straight bit)" },
+            { "48", "0", null, "OO지하차도", "tbt 13 ", "sharp right: unchanged (not in the list)" },
+            { "4", "180", null, "OO지하차도", "tbt 31 ", "U-turn: unchanged" },
+            { "23", "0", null, "OO지하차도", "tbt 17 ", "highway exit: unchanged" },
+            { "2", "90", null, "Some Rd", "tbt 13 ", "no facility word: unchanged" },
+        };
+        for (String[] k : tc) {
+            String l = nearTbt(nearManeuverDesc(Integer.parseInt(k[0]), Integer.parseInt(k[1]), k[2], k[3]), 300, ck += 1000000L);
+            check("2.4.10 T1-1: " + k[5] + " (got " + l + ")", l != null && l.startsWith(k[4]));
+        }
+        // 멀리(D 밖)는 그대로: 폰 아이콘 67, 막대 무효
+        String far = nearTbt(nearManeuverDesc(2, 90, null, "반포지하차도"), 900, ck += 1000000L);
+        check("2.4.10 T1-1: far (900 m) is unchanged: 67, bar invalid (got " + far + ")", far != null && far.equals("tbt 67 0 0.0 900.0 0 0 0 0 -1"));
+        // 막대 시작은 지금 규칙(D = 350m): 340m에서 막대 90
+        String bar = nearTbt(nearManeuverDesc(2, 90, null, "반포지하차도"), 340, ck += 1000000L);
+        check("2.4.10 T1-1: the bar starts as before (D 350 m: 340 m -> 90) (got " + bar + ")", bar != null && bar.startsWith("tbt 46 0 90.0 340.0 ") && bar.endsWith(" 90 0"));
+        check("2.4.10 T1-1: facilityWord: 1 hit, 2 hit with a not-word, 0 none or null",
+                CpTurnsFit.facilityWord("반포지하차도", CpTurnsFit.UNDERPASS_WORDS) == 1
+                        && CpTurnsFit.facilityWord("지하차도 지나서", CpTurnsFit.UNDERPASS_WORDS) == 2
+                        && CpTurnsFit.facilityWord("Some Rd", CpTurnsFit.UNDERPASS_WORDS) == 0 && CpTurnsFit.facilityWord(null, CpTurnsFit.OVERPASS_WORDS) == 0);
+
+        // L-1 회전교차로: 순정 니로 PHEV(32, 315도, 옆길 8208 = 비트 4·13). 폰이 출구 -45도와 다른 길 90도를 주면 같은 값
+        c = new Cluster();
+        CpTurnsFit rt = new CpTurnsFit(new android.content.Context(), c, null);
+        rt.clock = ck += 1000000L;
+        rt.maneuver(nearManeuver(0, 32, 0, 1, -45, new int[] { 90 }, -1, "Round Rd"));
+        rt.routeGuidance(rgAt(1, 400));
+        rt.routeGuidance(rgAt(1, 90));
+        String l1 = last("tbt ");
+        check("2.4.10 L-1: roundabout exit -45 with another road at 90, 90 m left of D 350: 32, side 8208, 315.0, bar 20 (stock 07:40:21) (got " + l1 + ")",
+                l1 != null && l1.startsWith("tbt 32 8208 315.0 90.0 ") && l1.endsWith(" 20 0"));
+        l1 = nearTbt(nearManeuver(0, 32, 0, 1, -45, null, -1, "Round Rd"), 300, ck += 1000000L);
+        check("2.4.10 L-1: no other-road angles: only the exit bit 13 (8192) (got " + l1 + ")", l1 != null && l1.startsWith("tbt 32 8192 315.0 300.0 "));
+        l1 = nearTbt(nearManeuver(0, 2, 0, 1, 90, null, -1, "Round Rd"), 300, ck += 1000000L);
+        check("2.4.10 L-1: roundabout right exit 90: 32 at 90.0, exit bit 4 (got " + l1 + ")", l1 != null && l1.startsWith("tbt 32 16 90.0 300.0 "));
+        String far1 = nearTbt(nearManeuver(0, 32, 0, 1, -45, null, -1, "Round Rd"), 900, ck += 1000000L);
+        check("2.4.10 L-1: far is unchanged: the exit icon 104 (got " + far1 + ")", far1 != null && far1.startsWith("tbt 104 0 0.0 900.0 "));
+        check("2.4.10 L-1: left-hand traffic (side 1) and an exit without an angle keep the exit icon; entering (6) keeps its icon",
+                arr(CpTurnsFit.nearDisplay(31, 1, 1, 0, 192)).equals("[192, 0, 0]")
+                        && arr(CpTurnsFit.nearDisplay(2, 0, 1, 0, 96)).equals("[96, 0, 0]")
+                        && arr(CpTurnsFit.nearDisplay(6, 0, 1, 90, 97)).equals("[97, 4, 12]")
+                        && arr(CpTurnsFit.nearDisplay(2, 1, 1, 90, 195)).equals("[195, 4, 12]"));
+
+        // L-2 진입 램프(9): 각도 없음 → 13, 22.5도, 옆길 3(순정 K7 16:29:00)
+        String l2 = nearTbt(nearManeuver(0, 9, 0, 0, 0, null, -1, "Ramp"), 120, ck += 1000000L);
+        check("2.4.10 L-2: on-ramp without an angle: 13, side 3, 22.5 (stock K7) (got " + l2 + ")", l2 != null && l2.startsWith("tbt 13 3 22.5 120.0 "));
+        l2 = nearTbt(nearManeuver(0, 9, 1, 0, 0, null, -1, "Ramp"), 120, ck += 1000000L);
+        check("2.4.10 L-2: left-hand traffic: the mirror 13, side 16385 (bits 0, 14), 337.5 (not seen on a stock car) (got " + l2 + ")",
+                l2 != null && l2.startsWith("tbt 13 16385 337.5 120.0 "));
+        l2 = nearTbt(nearManeuver(0, 9, 0, 0, 45, null, -1, "Ramp"), 120, ck += 1000000L);
+        check("2.4.10 L-2: on-ramp with the phone's angle 45: that angle, no extra straight bit (got " + l2 + ")", l2 != null && l2.startsWith("tbt 13 4 45.0 120.0 "));
+        String far2 = nearTbt(nearManeuver(0, 9, 0, 0, 0, null, -1, "Ramp"), 900, ck += 1000000L);
+        check("2.4.10 L-2: far is unchanged: 160 (got " + far2 + ")", far2 != null && far2.startsWith("tbt 160 0 0.0 900.0 "));
+
+        // L-3 목적지 접근: 순정 B·C·D "tbt icon 113 side 0 dir 0.0 … bar 0 barErr -1"(가까워도 곧 회전 아님)
+        String l3 = nearTbt(nearManeuver(0, 25, 0, 0, 0, null, -1, "Dest"), 30, ck += 1000000L);
+        check("2.4.10 L-3: destination on the right (25) at 30 m: 113, side 0, dir 0, bar 0, barErr -1 as stock (got " + l3 + ")",
+                "tbt 113 0 0.0 30.0 0 0 0 0 -1".equals(l3));
+        l3 = nearTbt(nearManeuver(0, 24, 0, 0, 0, null, -1, "Dest"), 190, ck += 1000000L);
+        check("2.4.10 L-3: destination on the left (24) at 190 m: 114 the same way (got " + l3 + ")", "tbt 114 0 0.0 190.0 0 0 0 0 -1".equals(l3));
+
+        // T1-4 거리 문자열 로그: 유무·단위만, 문자열은 남기지 않음
+        Dipo.logs.clear();
+        c = new Cluster();
+        CpTurnsFit t = new CpTurnsFit(new android.content.Context(), c, null);
+        t.clock = ck += 1000000L;
+        t.maneuver(nearManeuver(0, 2, 0, 0, 90, null, -1, "Right Rd"));
+        t.routeGuidance(rgAt(1, 900));
+        t.routeGuidance(rgAt(1, 800));
+        t.routeGuidance(msg(0, U16, i(1), 1, ENUM, i(1), 10, U32, i(700), 11, STR, s("abc"), 12, ENUM, i(2), 13, U16, i(0)));
+        t.routeGuidance(msg(0, U16, i(1), 1, ENUM, i(1), 10, U32, i(650), 11, STR, s("abc"), 12, ENUM, i(0), 13, U16, i(0)));
+        t.routeGuidance(msg(0, U16, i(1), 1, ENUM, i(1), 10, U32, i(600), 11, STR, s(""), 12, ENUM, i(0), 13, U16, i(0)));
+        java.util.List<String> ml = new java.util.ArrayList<String>();
+        for (String x : Dipo.logs) if (x.startsWith("CarPlay: maneuver ")) ml.add(x);
+        check("2.4.10 T1-4: maneuver lines end with dist str 1/2/0 and the unit; the distance or the unit changing alone adds no line (got " + ml + ")",
+                ml.size() == 3 && ml.get(0).endsWith("(exact) dist str 1 units 2") && ml.get(1).endsWith("(exact) dist str 2 units 2")
+                        && ml.get(2).endsWith(" dist str 0 units 0") && !ml.toString().contains("abc"));
+        // 수집 USB(public/usb-tbtlog/NEMESIS.sh 193행)는 머리말 "CarPlay: maneuver "만 보고, keep()이 허용 문자 밖(여기서는 ">")을 지운다
+        check("2.4.10 T1-4: the tbtlog USB filter still takes the line (prefix) and keep() leaves the new suffix whole",
+                ml.size() == 3 && ml.get(0).startsWith("CarPlay: maneuver ")
+                        && ml.get(0).replaceAll("[^A-Za-z0-9 ._:=,()/+-]", "").endsWith("(exact) dist str 1 units 2"));
+        check("2.4.10 T1-4: distStrState", CpTurns.distStrState(null) == 0 && CpTurns.distStrState("") == 0 && CpTurns.distStrState("1.5") == 1
+                && CpTurns.distStrState("-1") == 2 && CpTurns.distStrState("x") == 2);
+
+        // I-6 진단 줄 한도 1200
+        Dipo.logs.clear();
+        t = new CpTurnsFit(new android.content.Context(), new Cluster(), null);
+        t.debug = true;
+        for (int k = 0; k < 1300; k++) t.diag("CarPlay diag: lane guidance index " + k + " lanes 1");
+        int n = 0;
+        for (String x : Dipo.logs) if (x.startsWith("CarPlay diag:")) n++;
+        check("2.4.10 I-6: diag lines capped at 1200 per process (got " + n + ")", n == 1200 && CpTurnsFit.DIAG_LOGS_MAX == 1200);
+        Dipo.logs.clear();
+    }
+
     /** 진단 줄("CarPlay diag:")만 꺼내고 모은 로그를 비운다 */
     static java.util.List<String> diagLines() {
         java.util.List<String> r = new java.util.ArrayList<String>();
@@ -1513,10 +1654,10 @@ public final class CpTurnsTest {
         int[] r = CpTurnsFit.nearDisplay(2, 0, 0, 0, 67), l = CpTurnsFit.nearDisplay(1, 0, 0, -90, 70), u = CpTurnsFit.nearDisplay(4, 0, 0, 0, 72),
                 ul = CpTurnsFit.nearDisplay(4, 1, 0, 0, 73), xr = CpTurnsFit.nearDisplay(23, 0, 0, 0, 164), xl = CpTurnsFit.nearDisplay(22, 0, 0, 0, 165),
                 fk = CpTurnsFit.nearDisplay(13, 0, 0, 0, 71), rb = CpTurnsFit.nearDisplay(29, 0, 1, 90, 99), sr = CpTurnsFit.nearDisplay(48, 0, 0, 0, 68);
-        check("1.7.2 M-4 display: turn 13 (right 12, left 36), U-turn 31 (36; left-hand traffic 12), exit right 17 / left 18, keep left 13 at 337.5 (1.8.0), roundabout its exit icon",
+        check("1.7.2 M-4 display: turn 13 (right 12, left 36), U-turn 31 (36; left-hand traffic 12), exit right 17 / left 18, keep left 13 at 337.5 (1.8.0), roundabout 32 at its exit slot (2.4.10 L-1, was its exit icon 99)",
                 arr(r).equals("[13, 4, 12]") && arr(l).equals("[13, 11, 36]") && arr(u).equals("[31, -1, 36]") && arr(ul).equals("[31, -1, 12]")
                         && arr(xr).equals("[17, -1, 12]") && arr(xl).equals("[18, -1, 36]") && arr(fk).equals("[13, 14, 45]")
-                        && arr(rb).equals("[99, 4, 12]") && arr(sr).equals("[13, 6, 18]"));
+                        && arr(rb).equals("[32, 4, 12]") && arr(sr).equals("[13, 6, 18]"));
         check("1.7.2 M-4 display: destination, waypoint, departure, ferry, no turn: no near layout (far, bar invalid)",
                 CpTurnsFit.nearDisplay(12, 0, 0, 0, 112) == null && CpTurnsFit.nearDisplay(10, 0, 0, 0, 112) == null
                         && CpTurnsFit.nearDisplay(24, 0, 0, 0, 114) == null && CpTurnsFit.nearDisplay(11, 0, 0, 0, 1) == null
@@ -1908,6 +2049,7 @@ public final class CpTurnsTest {
         stockSideBits();
         review5();
         layerChoice();
+        mode181();
         System.exit(fail);
     }
 
